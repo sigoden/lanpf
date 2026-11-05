@@ -30,15 +30,20 @@ impl Daemon {
         let Some(handle) = self.sessions.get(peer.device_id) else {
             return Err(ipc_err(
                 ExitCode::NotPairedOrOffline,
-                format!("{} is offline", peer.display()),
+                format!(
+                    "{} [{}] is offline",
+                    self.display_peer(&peer),
+                    lanfp_core::short_id(peer.device_id)
+                ),
             ));
         };
         if !peer_has_port(&handle, target_port) {
             return Err(ipc_err(
                 ExitCode::TargetNotInInventory,
                 format!(
-                    "port {target_port} is not in {}'s Native inventory",
-                    peer.display()
+                    "port {target_port} is not in {} [{}]'s Native inventory",
+                    self.display_peer(&peer),
+                    lanfp_core::short_id(peer.device_id)
                 ),
             ));
         }
@@ -107,7 +112,7 @@ impl Daemon {
         serde_json::to_value(ForwardAddResult {
             schema: lanfp_core::JSON_SCHEMA,
             local: listen_port,
-            peer: peer.display(),
+            peer: self.display_peer(&peer),
             target: target_port,
             state: rule.state,
         })
@@ -124,11 +129,12 @@ impl Daemon {
                 let peer = peers
                     .iter()
                     .find(|p| p.device_id == rule.peer_id)
-                    .map(|p| p.display())
+                    .map(|p| self.display_peer(p))
                     .unwrap_or_else(|| rule.peer_id.to_string());
                 ForwardInfo {
                     local: rule.listen_port,
                     peer,
+                    peer_id: rule.peer_id,
                     target: rule.target_port,
                     state: rule.state,
                     since: rule.created_at,

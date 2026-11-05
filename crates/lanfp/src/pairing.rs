@@ -454,15 +454,17 @@ impl Daemon {
         let target = self.pairing_target(&selector)?;
         let (connect_addr, peer_uuid_hint) = match &target {
             PairTarget::Paired(peer) => (
-                peer.connect_addr().ok_or_else(|| {
-                    ipc_err(
-                        ExitCode::DeviceNotFound,
-                        format!(
-                            "{} has no known address; use `lanfp pair <ip>`",
-                            peer.display()
-                        ),
-                    )
-                })?,
+                self.current_peer_addr(peer)
+                    .map(|addr| addr.to_string())
+                    .ok_or_else(|| {
+                        ipc_err(
+                            ExitCode::DeviceNotFound,
+                            format!(
+                                "{} has no known address; use `lanfp pair <ip>`",
+                                self.display_peer(peer)
+                            ),
+                        )
+                    })?,
                 Some(peer.device_id),
             ),
             PairTarget::Discovered(discovered) => (
@@ -596,6 +598,7 @@ impl Daemon {
             schema: lanfp_core::JSON_SCHEMA,
             token,
             peer: display,
+            id: peer_uuid,
             address: SocketAddr::new(peer_ip, peer_agent_port).to_string(),
         })
         .map_err(crate::daemon::internal)
@@ -789,6 +792,7 @@ impl Daemon {
         serde_json::to_value(PairFinishResult {
             schema: lanfp_core::JSON_SCHEMA,
             peer: display,
+            id: pair.peer_uuid,
             name: peer.name.clone(),
             address: SocketAddr::new(pair.peer_ip, pair.peer_agent_port).to_string(),
         })

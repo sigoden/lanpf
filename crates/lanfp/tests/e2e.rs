@@ -629,3 +629,99 @@ async fn peer_set_address_updates_the_record() {
     let missing = a.cli(&["peer", "set-address", "nobody", "127.0.0.1"]);
     assert_eq!(missing.status.code(), Some(3), "{missing:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_list_and_selector_forms() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let _ = pair(&a, &b).await;
+    a.wait_online(1).await;
+
+    let list: PeerListResult = a.call_ok(Command::PeerList).await;
+    assert_eq!(list.peers.len(), 1);
+    let entry = &list.peers[0];
+    assert_eq!(entry.address, "127.0.0.1");
+    assert_eq!(entry.port, b.port);
+    assert!(entry.online);
+    let full = entry.id;
+    let short = lanfp_core::short_id(full);
+
+    let text = a.cli(&["peer", "list"]);
+    assert!(text.status.success(), "{text:?}");
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("ID"), "{stdout}");
+    assert!(stdout.contains(&full.to_string()), "{stdout}");
+
+    let simple = full.simple().to_string();
+    let selectors = vec![
+        full.to_string(),
+        simple.clone(),
+        short.clone(),
+        entry.name.clone(),
+        format!("{}@127.0.0.1:{}", entry.name, b.port),
+        format!("127.0.0.1:{}", b.port),
+        simple[..4].to_string(),
+    ];
+    for selector in selectors {
+        let remote: RemoteResult = a
+            .call_ok(Command::Remote {
+                peer: Some(selector.clone()),
+            })
+            .await;
+        assert_eq!(remote.peers[0].id, full, "selector `{selector}`");
+    }
+
+    // A stale name@address is reported with the current location.
+    let stale = format!("{}@127.0.0.1:{}", entry.name, free_port());
+    let err = a
+        .call_err(Command::Remote {
+            peer: Some(stale.clone()),
+        })
+        .await;
+    assert_eq!(err.code, 3, "{err:?}");
+    assert!(err.message.contains("currently at"), "{err:?}");
+    assert!(err.message.contains(&short), "{err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_names_are_ambiguous() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let c = Node::start().await;
+    let _ = pair(&a, &b).await;
+    let _ = pair(&a, &c).await;
+    a.wait_online(2).await;
+
+    let list: PeerListResult = a.call_ok(Command::PeerList).await;
+    assert_eq!(list.peers.len(), 2);
+    let name = list.peers[0].name.clone();
+    assert_eq!(list.peers[1].name, name);
+
+    let err = a
+        .call_err(Command::Remote {
+            peer: Some(name.clone()),
+        })
+        .await;
+    assert_eq!(err.code, 2, "{err:?}");
+    assert!(err.message.contains("matches 2 devices"), "{err:?}");
+    assert!(
+        err.message
+            .contains(&lanfp_core::short_id(list.peers[0].id)),
+        "{err:?}"
+    );
+
+    // The stable ID disambiguates, and so does the full address.
+    let chosen = &list.peers[1];
+    let remote: RemoteResult = a
+        .call_ok(Command::Remote {
+            peer: Some(lanfp_core::short_id(chosen.id)),
+        })
+        .await;
+    assert_eq!(remote.peers[0].id, chosen.id);
+    let remote: RemoteResult = a
+        .call_ok(Command::Remote {
+            peer: Some(format!("127.0.0.1:{}", chosen.port)),
+        })
+        .await;
+    assert_eq!(remote.peers[0].id, chosen.id);
+}

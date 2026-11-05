@@ -96,6 +96,8 @@ pub struct RemoteArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PeerCmd {
+    /// List paired devices with their stable IDs.
+    List(JsonArgs),
     /// Update the address used to reach a paired device.
     SetAddress(PeerSetAddressArgs),
 }

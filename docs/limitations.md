@@ -23,6 +23,8 @@
 
 - mDNS may be blocked by firewalls, AP client isolation, VPNs or the macOS 15+ "Local Network"
   privacy permission. Fallback: `lanfp pair <ip>`, `lanfp pair <ip>:<port>`.
+- The UUID shown for an unpaired device in `lanfp scan` comes from its mDNS TXT record and is
+  unauthenticated; it only becomes trustworthy once the device is paired.
 - mDNS advertises only the device name, UUID, protocol version and agent port; it never
   advertises the port inventory.
 - Only one `lanfp pair wait` is allowed at a time; a second initiator gets "busy" (exit code 6).
@@ -40,10 +42,15 @@
 - Forwarding listeners are forced to `127.0.0.1`; binding `0.0.0.0` is not supported.
 - While the peer is offline the listener stays in place but new connections are closed
   immediately; they resume automatically once the peer is back.
-- A device's address is only a transport hint. The daemon updates it from mDNS and from the
-  source of inbound sessions, and re-advertises its own addresses within about 60 seconds of an
-  interface or DHCP change. When mDNS is blocked and the address changed, use
-  `lanfp peer set-address <peer> <ip[:port]>` instead of pairing again.
+- A device's identity is its UUID; `<name>@<address>` (the `PEER` column) is a view that is
+  formatted on every command. It prefers a fresh mDNS result, falls back to the stored address,
+  and uses the hostname last reported in an authenticated session hello.
+- The daemon updates the stored address from successful dials (which prefer a fresh mDNS
+  result), from the source of inbound sessions, and via `lanfp peer set-address`; it
+  re-advertises its own addresses within about 60 seconds of an interface or DHCP change.
+- Selectors accept a full UUID, a unique short-ID prefix, a unique name, `name@address` (the
+  address must be current), and a bare address. A selector that matches more than one device
+  exits 2 with the candidates instead of silently picking one.
 - Re-advertising after a network change unregisters and re-registers the mDNS record, so peers
   may briefly see the device disappear from `lanfp scan`; established sessions and forwarding
   rules are unaffected.

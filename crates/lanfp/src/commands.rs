@@ -10,6 +10,7 @@ use crate::paths::Paths;
 use crate::util::{format_uptime, print_json, relative_time};
 use lanfp_core::error::ExitCode;
 use lanfp_core::ipc::*;
+use lanfp_core::{short_id, short_ids};
 use serde::de::DeserializeOwned;
 use std::io::{IsTerminal, Write};
 use std::time::Duration;
@@ -28,11 +29,31 @@ fn paths() -> Result<Paths, CliError> {
     Paths::resolve().map_err(CliError::internal)
 }
 
+fn offline_notice(result: &RemoteResult) -> Option<String> {
+    if result.offline_peers.is_empty() {
+        if result.offline.is_empty() {
+            return None;
+        }
+        return Some(format!(
+            "skipping offline device(s): {}",
+            result.offline.join(", ")
+        ));
+    }
+    let list = result
+        .offline_peers
+        .iter()
+        .map(|peer| format!("{} [{}]", peer.peer, short_id(peer.id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("skipping offline device(s): {list}"))
+}
+
 pub async fn dispatch(command: Commands) -> Result<(), CliError> {
     match command {
         Commands::Scan(args) => scan(args).await,
         Commands::Pair(args) => pair(args).await,
         Commands::Peer(cmd) => match cmd {
+            PeerCmd::List(args) => peer_list(args).await,
             PeerCmd::SetAddress(args) => peer_set_address(args).await,
         },
         Commands::Local(args) => local(args).await,
@@ -72,18 +93,22 @@ async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
         eprintln!("hint: if mDNS is blocked, pair manually with `lanfp pair <ip>[:port]`");
         return Ok(());
     }
+    let ids: Vec<_> = result.peers.iter().map(|p| p.id).collect();
+    let short = short_ids(&ids);
     let rows: Vec<Vec<String>> = result
         .peers
         .iter()
-        .map(|p| {
+        .zip(short)
+        .map(|(p, id)| {
             vec![
+                id,
                 p.peer.clone(),
                 p.port.to_string(),
                 if p.paired { "paired" } else { "unpaired" }.to_string(),
             ]
         })
         .collect();
-    print_table(&["PEER", "PORT", "STATE"], &rows);
+    print_table(&["PEER ID", "PEER", "PORT", "STATE"], &rows);
     Ok(())
 }
 
@@ -122,15 +147,17 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
     )
     .await?;
     let result: RemoteResult = decode(response.data)?;
-    if let Some(note) = daemon::offline_notice(&result.offline) {
+    if let Some(note) = offline_notice(&result) {
         eprintln!("{note}");
     }
     if args.json {
         return print_json(&result).map_err(CliError::internal);
     }
+    let mut ids = Vec::new();
     let mut rows = Vec::new();
     for peer in &result.peers {
         for port in &peer.ports {
+            ids.push(peer.id);
             rows.push(vec![
                 peer.peer.clone(),
                 port.port.to_string(),
@@ -149,8 +176,25 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
             ]);
         }
     }
+    let short = short_ids(&ids);
+    let rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .zip(short)
+        .map(|(mut row, id)| {
+            row.insert(0, id);
+            row
+        })
+        .collect();
     print_table(
-        &["PEER", "PORT", "BIND", "PROCESS", "USER", "FORWARDED"],
+        &[
+            "PEER ID",
+            "PEER",
+            "PORT",
+            "BIND",
+            "PROCESS",
+            "USER",
+            "FORWARDED",
+        ],
         &rows,
     );
     Ok(())
@@ -172,13 +216,43 @@ async fn peer_set_address(args: crate::cli::PeerSetAddressArgs) -> Result<(), Cl
         return print_json(&result).map_err(CliError::internal);
     }
     if result.online {
-        println!("updated {} (online)", result.peer);
+        println!("updated {} [{}] (online)", result.peer, short_id(result.id));
     } else {
         println!(
-            "updated {} (offline; retrying in the background)",
-            result.peer
+            "updated {} [{}] (offline; retrying in the background)",
+            result.peer,
+            short_id(result.id)
         );
     }
+    Ok(())
+}
+
+async fn peer_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(&paths, Command::PeerList, true).await?;
+    let result: PeerListResult = decode(response.data)?;
+    if args.json {
+        return print_json(&result).map_err(CliError::internal);
+    }
+    let rows: Vec<Vec<String>> = result
+        .peers
+        .iter()
+        .map(|p| {
+            vec![
+                p.id.to_string(),
+                p.name.clone(),
+                if p.address.is_empty() {
+                    "-".into()
+                } else {
+                    p.address.clone()
+                },
+                p.port.to_string(),
+                if p.online { "online" } else { "offline" }.to_string(),
+                relative_time(p.paired_at),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "NAME", "ADDRESS", "PORT", "STATE", "SINCE"], &rows);
     Ok(())
 }
 
@@ -212,12 +286,16 @@ async fn forward_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
     if args.json {
         return print_json(&result).map_err(CliError::internal);
     }
+    let ids: Vec<_> = result.forwards.iter().map(|f| f.peer_id).collect();
+    let short = short_ids(&ids);
     let rows: Vec<Vec<String>> = result
         .forwards
         .iter()
-        .map(|f| {
+        .zip(short)
+        .map(|(f, id)| {
             vec![
                 f.local.to_string(),
+                id,
                 f.peer.clone(),
                 f.target.to_string(),
                 f.state.as_str().to_string(),
@@ -225,7 +303,10 @@ async fn forward_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
             ]
         })
         .collect();
-    print_table(&["LOCAL", "PEER", "TARGET", "STATE", "SINCE"], &rows);
+    print_table(
+        &["LOCAL", "PEER ID", "PEER", "TARGET", "STATE", "SINCE"],
+        &rows,
+    );
     Ok(())
 }
 
@@ -254,11 +335,15 @@ async fn inbound(args: crate::cli::JsonArgs) -> Result<(), CliError> {
     if args.json {
         return print_json(&result).map_err(CliError::internal);
     }
+    let ids: Vec<_> = result.inbound.iter().map(|i| i.id).collect();
+    let short = short_ids(&ids);
     let rows: Vec<Vec<String>> = result
         .inbound
         .iter()
-        .map(|i| {
+        .zip(short)
+        .map(|(i, id)| {
             vec![
+                id,
                 i.peer.clone(),
                 i.my_port.to_string(),
                 i.peer_listen.to_string(),
@@ -270,6 +355,7 @@ async fn inbound(args: crate::cli::JsonArgs) -> Result<(), CliError> {
         .collect();
     print_table(
         &[
+            "PEER ID",
             "PEER",
             "MY PORT",
             "PEER LISTEN",
@@ -332,7 +418,7 @@ async fn pair_initiate(args: crate::cli::PairArgs, selector: String) -> Result<(
     if args.json {
         return print_json(&finished).map_err(CliError::internal);
     }
-    println!("paired with {}", finished.peer);
+    println!("paired with {} [{}]", finished.peer, short_id(finished.id));
     Ok(())
 }
 
@@ -462,6 +548,7 @@ async fn daemon_status(json: bool) -> Result<(), CliError> {
     println!("pid: {}", status.pid);
     println!("uptime: {}", format_uptime(status.uptime_secs));
     println!("device: {}", status.device);
+    println!("device id: {}", status.device_id);
     println!("agent: {}", status.agent_addr);
     println!("ipc: {}", status.ipc_path);
     println!("log: {}", status.log_path);

@@ -93,12 +93,6 @@ impl PeerRecord {
             None => self.name.clone(),
         }
     }
-
-    /// `host:port` used for dialing.
-    pub fn connect_addr(&self) -> Option<String> {
-        let addr = self.last_addr.as_deref()?;
-        PeerAddr::parse(addr).ok().map(|p| p.connect_addr())
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +244,15 @@ impl Db {
             "UPDATE peer SET last_seen_at = ?2, last_addr = COALESCE(?3, last_addr)
              WHERE device_id = ?1",
             params![device_id.to_string(), ts, addr],
+        )?;
+        Ok(())
+    }
+
+    /// Refresh the stored display name from the peer's authenticated hello.
+    pub fn update_peer_name(&self, device_id: Uuid, name: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE peer SET name = ?2 WHERE device_id = ?1",
+            params![device_id.to_string(), name],
         )?;
         Ok(())
     }
@@ -512,9 +515,11 @@ mod tests {
         );
         db.update_peer_seen(p.device_id, Some("192.168.8.11:47811"), 300)
             .unwrap();
+        db.update_peer_name(p.device_id, "renamed").unwrap();
+        assert_eq!(db.get_peer(p.device_id).unwrap().unwrap().name, "renamed");
         let got = db.get_peer(p.device_id).unwrap().unwrap();
         assert_eq!(got.last_seen_at, Some(300));
-        assert_eq!(got.display(), "mac-mini@192.168.8.11");
+        assert_eq!(got.display(), "renamed@192.168.8.11");
     }
 
     #[test]

@@ -134,12 +134,14 @@ is blocked, set the address explicitly instead of pairing again:
 
 ```sh
 A$ lanfp peer set-address mac-mini 192.168.8.23
-updated mac-mini@192.168.8.23 (online)
+updated mac-mini@192.168.8.23 [5e6f7a8b] (online)
 ```
 
 The port defaults to 47811; use `<ip>:47811` for a non-default agent port. `--json` prints
-`{schema, peer, address, online}`. An established session is left untouched; the new address is
-used for the next dial (the next supervisor tick if the peer is offline).
+`{schema, peer, id, address, online}`. An established session is left untouched; the new address
+is used for the next dial (the next supervisor tick if the peer is offline).
+
+Use `lanfp peer list` to see every paired device with its full UUID, current address and state.
 
 ## Command reference
 
@@ -148,6 +150,7 @@ used for the next dial (the next supervisor tick if the peer is offline).
 | `lanfp scan [--timeout 3s] [--json]` | Live mDNS scan, lists devices |
 | `lanfp pair <peer> [--code <code>] [--force] [--json]` | Initiate pairing |
 | `lanfp pair wait [--timeout 300s]` | Wait for a pairing request and show the 6-digit code |
+| `lanfp peer list [--json]` | Paired devices with their stable IDs, addresses and state |
 | `lanfp peer set-address <peer> <ip[:port]> [--json]` | Update the stored address of a paired device |
 | `lanfp local [--json]` | Local **Native** service ports |
 | `lanfp remote [peer] [--json]` | Native ports of paired devices; without `peer`, lists all online devices |
@@ -161,8 +164,27 @@ used for the next dial (the next supervisor tick if the peer is offline).
 
 ### Identifier rules
 
-- Device: `<name>@<address>`, e.g. `mac-mini@192.168.8.10`. When the agent port is non-default it
-  is displayed as `mac-mini@192.168.8.10:47811`; IPv6 uses brackets `mac-mini@[fe80::1]`.
+- A device's stable identity is its UUID. Tables show the first 8 lowercase hex characters as
+  `PEER ID` (lengthened if two devices would collide); `lanfp peer list` and every `--json`
+  output carry the full UUID. The UUID survives
+  address and hostname changes, and moving the data directory moves the identity.
+- `PEER` is a view, not an identity: `<name>@<current address>`. It is formatted when a command
+  runs, prefers a fresh mDNS result, and changes when the address or the peer's hostname changes.
+  Use the ID as a persistent key in scripts.
+- Peer selectors accept these forms (a selector matching more than one device exits 2 and lists
+  the candidates):
+
+  | Form | Example | Rule |
+  |---|---|---|
+  | Full UUID | `5e6f7a8b-1c2d-4e3f-8a9b-0c1d2e3f4a5b` | exact |
+  | Short ID prefix | `5e6f7a8b` | at least 4 hex characters, unique |
+  | Device name | `mac-mini` | case-insensitive, unique |
+  | `name@IP` | `mac-mini@192.168.8.23` | name and the **current** address must match; the port is checked only when written |
+  | Bare IP | `192.168.8.23`, `192.168.8.23:5000` | current address, unique |
+
+- The displayed name comes from the remote hostname and is refreshed on the next session
+  establishment (the hello is authenticated by the pinned key). Two devices can share a name;
+  bare-name selection is then ambiguous, so use the ID.
 - Rule: the user-visible ID is the local listening port. The listener is always `127.0.0.1`, so
   the address is omitted when displayed.
 - The `FORWARDED` column of `lanfp remote` shows the local listening port, e.g. `-> 3000`.
@@ -178,6 +200,7 @@ The `--json` output of every data command is a single object carrying `schema: 1
   "peers": [
     {
       "peer": "mac-mini@192.168.8.10",
+      "id": "5e6f7a8b-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
       "name": "mac-mini",
       "address": "192.168.8.10",
       "port": 47811,
@@ -188,14 +211,17 @@ The `--json` output of every data command is a single object carrying `schema: 1
 }
 ```
 
-With `--json`, stdout contains only JSON; error messages go to stderr.
+With `--json`, stdout contains only JSON; error messages go to stderr. Peer-scoped entries carry
+an `id` (full UUID; `ForwardInfo` calls it `peer_id`), and `lanfp daemon status` carries
+`device_id` for this machine. `lanfp remote` also returns `offline_peers` with the IDs of skipped
+devices.
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Invalid arguments |
+| 2 | Invalid arguments or ambiguous peer selector |
 | 3 | Device / rule not found |
 | 4 | Device not paired or offline |
 | 5 | Listening port already in use / bind failure |
@@ -274,6 +300,9 @@ See [Security model](docs/security.md) for details.
   `netstat` because `netstat2` cannot read other users' sockets without root.
 - Ports inside separate network namespaces such as Docker containers and WSL2 are not enumerated.
 - mDNS may be blocked by a firewall/AP isolation: pair manually with `lanfp pair <ip>[:port]`.
+- The ID shown for an unpaired device in `lanfp scan` comes from mDNS and is not verified until
+  the device is paired.
+- Two devices with the same hostname make bare-name selectors ambiguous (exit 2); use the ID.
 - The macOS 15+ "Local Network" privacy permission may affect mDNS and outbound connections.
 - TCP only; no UDP, multi-hop, NAT traversal, public relay, or auto-update.
 - The port inventory comes from `netstat2` + `sysinfo`; process attribution is best effort.

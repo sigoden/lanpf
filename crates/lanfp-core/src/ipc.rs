@@ -63,6 +63,8 @@ pub enum Command {
         peer: String,
         address: String,
     },
+    /// List paired devices with their stable IDs.
+    PeerList,
     DaemonStop,
 }
 
@@ -137,6 +139,8 @@ pub struct StatusInfo {
     pub ipc_path: String,
     pub log_path: String,
     pub device: String,
+    /// Stable UUID of this device.
+    pub device_id: Uuid,
     pub version: String,
     pub peers_paired: usize,
     pub peers_online: usize,
@@ -151,6 +155,8 @@ impl StatusInfo {
 pub struct ScanPeer {
     /// `<name>@<address>` selector.
     pub peer: String,
+    /// Stable device UUID reported over mDNS (unverified until pairing).
+    pub id: Uuid,
     pub name: String,
     pub address: String,
     pub port: u16,
@@ -183,11 +189,19 @@ pub struct RemotePort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePeer {
     pub peer: String,
+    /// Stable device UUID.
+    pub id: Uuid,
     pub name: String,
     pub address: String,
     pub port: u16,
     pub online: bool,
     pub ports: Vec<RemotePort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerRef {
+    pub id: Uuid,
+    pub peer: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,12 +211,17 @@ pub struct RemoteResult {
     /// Paired devices that were skipped because they are offline.
     #[serde(default)]
     pub offline: Vec<String>,
+    /// Same set as `offline`, with the stable IDs.
+    #[serde(default)]
+    pub offline_peers: Vec<PeerRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardInfo {
     pub local: u16,
     pub peer: String,
+    /// Stable UUID of the peer this rule belongs to.
+    pub peer_id: Uuid,
     pub target: u16,
     pub state: RuleState,
     pub since: i64,
@@ -233,6 +252,8 @@ pub struct ForwardRemoveResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundInfo {
     pub peer: String,
+    /// Stable UUID of the peer that owns the forward.
+    pub id: Uuid,
     pub my_port: u16,
     pub peer_listen: u16,
     pub since: i64,
@@ -260,6 +281,7 @@ pub struct PairStartResult {
     pub schema: u32,
     pub token: Uuid,
     pub peer: String,
+    pub id: Uuid,
     pub address: String,
 }
 
@@ -267,6 +289,7 @@ pub struct PairStartResult {
 pub struct PairFinishResult {
     pub schema: u32,
     pub peer: String,
+    pub id: Uuid,
     pub name: String,
     pub address: String,
 }
@@ -276,9 +299,28 @@ pub struct PeerSetAddressResult {
     pub schema: u32,
     /// `<name>@<new address>` of the updated peer.
     pub peer: String,
+    /// Stable UUID of the updated peer.
+    pub id: Uuid,
     /// New `ip:port` used for future dials.
     pub address: String,
     pub online: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerListEntry {
+    /// Full device UUID.
+    pub id: Uuid,
+    pub name: String,
+    pub address: String,
+    pub port: u16,
+    pub online: bool,
+    pub paired_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerListResult {
+    pub schema: u32,
+    pub peers: Vec<PeerListEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +397,7 @@ mod tests {
                 peer: "a@1.2.3.4".into(),
                 address: "10.0.0.2:47811".into(),
             },
+            Command::PeerList,
             Command::DaemonStop,
         ];
         for cmd in cmds {
@@ -373,6 +416,7 @@ mod tests {
                 schema: JSON_SCHEMA,
                 peers: vec![ScanPeer {
                     peer: "mac-mini@192.168.8.10".into(),
+                    id: Uuid::nil(),
                     name: "mac-mini".into(),
                     address: "192.168.8.10".into(),
                     port: 47811,

@@ -21,11 +21,16 @@ use lanfp_crypto::Identity;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// A peer's mDNS result is trusted for display/dialing for this long.
+const DISCOVERY_FRESH: Duration = Duration::from_secs(120);
+/// Shortest accepted UUID prefix.
+const UUID_PREFIX_MIN: usize = 4;
 
 pub struct RuleListener {
     pub cancel: CancellationToken,
@@ -421,6 +426,7 @@ impl Daemon {
             Command::PeerSetAddress { peer, address } => {
                 self.peer_set_address_json(peer, address).await
             }
+            Command::PeerList => self.peer_list_json(),
             Command::DaemonStop => Ok(serde_json::json!({"stopped": true})),
         };
         match result {
@@ -451,6 +457,7 @@ impl Daemon {
             ipc_path: self.paths.socket_display(),
             log_path: self.paths.log_file().display().to_string(),
             device: self.device_display(),
+            device_id: self.device_id,
             version: build_id(),
             peers_paired: peers.len(),
             peers_online: online,
@@ -490,6 +497,7 @@ impl Daemon {
                 };
                 ScanPeer {
                     peer: d.display(),
+                    id: d.uuid,
                     name: d.name.clone(),
                     address,
                     port,
@@ -508,12 +516,17 @@ impl Daemon {
     async fn remote_json(&self, selector: Option<String>) -> Result<serde_json::Value, IpcError> {
         let mut peers = Vec::new();
         let mut offline = Vec::new();
+        let mut offline_peers = Vec::new();
         if let Some(selector) = selector {
             let record = self.resolve_paired_peer(&selector)?;
             let Some(handle) = self.sessions.get(record.device_id) else {
                 return Err(ipc_err(
                     ExitCode::NotPairedOrOffline,
-                    format!("{} is offline", record.display()),
+                    format!(
+                        "{} [{}] is offline",
+                        self.display_peer(&record),
+                        lanfp_core::short_id(record.device_id)
+                    ),
                 ));
             };
             peers.push(self.remote_peer(&record, &handle));
@@ -521,14 +534,25 @@ impl Daemon {
             for record in self.db.list_peers().map_err(internal)? {
                 match self.sessions.get(record.device_id) {
                     Some(handle) => peers.push(self.remote_peer(&record, &handle)),
-                    None => offline.push(record.display()),
+                    None => {
+                        let display = self.display_peer(&record);
+                        offline.push(display.clone());
+                        offline_peers.push(PeerRef {
+                            id: record.device_id,
+                            peer: display,
+                        });
+                    }
                 }
             }
             if peers.is_empty() {
                 let message = if offline.is_empty() {
                     "no paired devices; use `lanfp pair <peer>` first".to_string()
                 } else {
-                    format!("all paired devices are offline: {}", offline.join(", "))
+                    let shown: Vec<String> = offline_peers
+                        .iter()
+                        .map(|peer| format!("{} [{}]", peer.peer, lanfp_core::short_id(peer.id)))
+                        .collect();
+                    format!("all paired devices are offline: {}", shown.join(", "))
                 };
                 return Err(ipc_err(ExitCode::NotPairedOrOffline, message));
             }
@@ -537,12 +561,16 @@ impl Daemon {
             schema: lanfp_core::JSON_SCHEMA,
             peers,
             offline,
+            offline_peers,
         })
         .map_err(internal)
     }
 
     fn remote_peer(&self, record: &PeerRecord, handle: &Arc<session::SessionHandle>) -> RemotePeer {
-        let (address, port) = peer_host_port(record);
+        let (address, port) = match self.current_peer_addr(record) {
+            Some(addr) => (addr.ip().to_string(), addr.port()),
+            None => (String::new(), lanfp_core::DEFAULT_AGENT_PORT),
+        };
         let rules = self.rules.read().unwrap();
         let ports = handle
             .native_ports()
@@ -564,7 +592,8 @@ impl Daemon {
             })
             .collect();
         RemotePeer {
-            peer: record.display(),
+            peer: self.display_peer(record),
+            id: record.device_id,
             name: record.name.clone(),
             address,
             port,
@@ -582,8 +611,9 @@ impl Daemon {
             let online = row.online && self.sessions.get(row.peer_id).is_some();
             inbound.push(InboundInfo {
                 peer: peer
-                    .map(|p| p.display())
+                    .map(|p| self.display_peer(p))
                     .unwrap_or_else(|| row.peer_id.to_string()),
+                id: row.peer_id,
                 my_port: row.target_port,
                 peer_listen: row.peer_listen_port,
                 since: row.first_seen_at,
@@ -599,21 +629,224 @@ impl Daemon {
         .map_err(internal)
     }
 
+    fn peer_list_json(&self) -> Result<serde_json::Value, IpcError> {
+        let mut peers: Vec<PeerListEntry> = self
+            .db
+            .list_peers()
+            .map_err(internal)?
+            .into_iter()
+            .map(|record| {
+                let (address, port) = match self.current_peer_addr(&record) {
+                    Some(addr) => (addr.ip().to_string(), addr.port()),
+                    None => (String::new(), lanfp_core::DEFAULT_AGENT_PORT),
+                };
+                PeerListEntry {
+                    id: record.device_id,
+                    name: record.name,
+                    address,
+                    port,
+                    online: self.sessions.get(record.device_id).is_some(),
+                    paired_at: record.paired_at,
+                }
+            })
+            .collect();
+        peers.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.id.cmp(&b.id))
+        });
+        serde_json::to_value(PeerListResult {
+            schema: lanfp_core::JSON_SCHEMA,
+            peers,
+        })
+        .map_err(internal)
+    }
+
     // ------------------------------------------------------------------
     // Peer selection helpers
     // ------------------------------------------------------------------
 
-    /// Resolve a selector to a paired peer. Returns exit code 3 when nothing
-    /// matches and 4 when the device is known but not paired.
-    pub fn resolve_paired_peer(&self, selector: &str) -> Result<PeerRecord, IpcError> {
-        let peers = self.db.list_peers().map_err(internal)?;
-        if let Some(peer) = match_peer(&peers, selector) {
-            return Ok(peer);
+    /// Address used to reach a peer right now: a fresh mDNS result wins over
+    /// the address stored in the database.
+    pub fn current_peer_addr(&self, peer: &PeerRecord) -> Option<SocketAddr> {
+        self.discovery
+            .fresh_addr(peer.device_id, DISCOVERY_FRESH)
+            .or_else(|| {
+                peer.last_addr
+                    .as_deref()
+                    .and_then(|raw| PeerAddr::parse(raw).ok())
+                    .and_then(|parsed| parsed.socket_addr())
+            })
+    }
+
+    /// `<name>@<current address>`, formatted when a list is printed. This is a
+    /// view, not an identity: the stable identity is always [`PeerRecord::device_id`].
+    pub fn display_peer(&self, peer: &PeerRecord) -> String {
+        match self.current_peer_addr(peer) {
+            Some(addr) => lanfp_core::format_peer(&peer.name, &addr.ip().to_string(), addr.port()),
+            None => peer.display(),
         }
-        if let Some(found) = self.discovery_match(selector) {
+    }
+
+    /// Reject a selector that matches more than one device instead of silently
+    /// picking the first one.
+    fn ambiguous_error(&self, selector: &str, matches: &[PeerRecord]) -> IpcError {
+        let ids: Vec<Uuid> = matches.iter().map(|peer| peer.device_id).collect();
+        let short = lanfp_core::short_ids(&ids);
+        let mut message = format!("`{selector}` matches {} devices:", matches.len());
+        for (peer, id) in matches.iter().zip(short) {
+            let state = if self.sessions.get(peer.device_id).is_some() {
+                "online"
+            } else {
+                "offline"
+            };
+            message.push_str(&format!("\n  {id}  {}  {state}", self.display_peer(peer)));
+        }
+        message.push_str("\nuse the device ID (`lanfp peer list`) to disambiguate");
+        ipc_err(ExitCode::Usage, message)
+    }
+
+    fn ambiguous_discovered(&self, selector: &str, matches: &[DiscoveredPeer]) -> IpcError {
+        let ids: Vec<Uuid> = matches.iter().map(|peer| peer.uuid).collect();
+        let short = lanfp_core::short_ids(&ids);
+        let mut message = format!("`{selector}` matches {} unpaired devices:", matches.len());
+        for (peer, id) in matches.iter().zip(short) {
+            message.push_str(&format!("\n  {id}  {}  unpaired", peer.display()));
+        }
+        message.push_str("\nuse the device ID (`lanfp scan`) to disambiguate");
+        ipc_err(ExitCode::Usage, message)
+    }
+
+    /// All paired devices matching a selector. The same string is tried as a
+    /// full UUID, a UUID prefix, a device name, `name@address`, and a bare
+    /// address; the union must contain exactly one device.
+    fn paired_matches(&self, selector: &str) -> Result<Vec<PeerRecord>, IpcError> {
+        let peers = self.db.list_peers().map_err(internal)?;
+        let s = selector.trim();
+        let mut found: Vec<Uuid> = Vec::new();
+
+        if let Some(uuid) = parse_full_uuid(s) {
+            if peers.iter().any(|peer| peer.device_id == uuid) {
+                push_unique(&mut found, uuid);
+            }
+        }
+        if let Some(prefix) = uuid_prefix(s) {
+            for peer in &peers {
+                if peer
+                    .device_id
+                    .simple()
+                    .to_string()
+                    .starts_with(prefix.as_str())
+                {
+                    push_unique(&mut found, peer.device_id);
+                }
+            }
+        }
+
+        let parsed = PeerAddr::parse(s).ok();
+        if s.contains('@') {
+            if let Some(parsed) = &parsed {
+                if let Some(name) = &parsed.name {
+                    let explicit = lanfp_core::has_explicit_port(s);
+                    for peer in &peers {
+                        if peer.name.eq_ignore_ascii_case(name)
+                            && self.address_matches(peer, &parsed.host, parsed.port, explicit)
+                        {
+                            push_unique(&mut found, peer.device_id);
+                        }
+                    }
+                }
+            }
+        } else {
+            for peer in &peers {
+                if peer.name.eq_ignore_ascii_case(s) {
+                    push_unique(&mut found, peer.device_id);
+                }
+            }
+            if let Some(parsed) = &parsed {
+                if parsed.host.parse::<IpAddr>().is_ok() {
+                    let explicit = lanfp_core::has_explicit_port(s);
+                    for peer in &peers {
+                        if self.address_matches(peer, &parsed.host, parsed.port, explicit) {
+                            push_unique(&mut found, peer.device_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(peers
+            .into_iter()
+            .filter(|peer| found.contains(&peer.device_id))
+            .collect())
+    }
+
+    fn address_matches(
+        &self,
+        peer: &PeerRecord,
+        host: &str,
+        port: u16,
+        explicit_port: bool,
+    ) -> bool {
+        let Ok(ip) = host.parse::<IpAddr>() else {
+            return false;
+        };
+        let Some(addr) = self.current_peer_addr(peer) else {
+            return false;
+        };
+        addr.ip() == ip && (!explicit_port || addr.port() == port)
+    }
+
+    /// Resolve a selector to a paired peer. Ambiguous selectors are a usage
+    /// error (exit 2); exit 3 means nothing matched, 4 means the device is
+    /// discovered but not paired.
+    pub fn resolve_paired_peer(&self, selector: &str) -> Result<PeerRecord, IpcError> {
+        let matches = self.paired_matches(selector)?;
+        match matches.len() {
+            1 => return Ok(matches.into_iter().next().expect("one match")),
+            0 => {}
+            _ => return Err(self.ambiguous_error(selector, &matches)),
+        }
+
+        // A `name@address` selector whose name exists but whose address is no
+        // longer current deserves a precise hint instead of "not found".
+        if let Ok(parsed) = PeerAddr::parse(selector) {
+            if let Some(name) = parsed.name.as_deref() {
+                let peers = self.db.list_peers().map_err(internal)?;
+                let by_name: Vec<PeerRecord> = peers
+                    .into_iter()
+                    .filter(|peer| peer.name.eq_ignore_ascii_case(name))
+                    .collect();
+                match by_name.len() {
+                    1 => {
+                        let peer = &by_name[0];
+                        return Err(ipc_err(
+                            ExitCode::DeviceNotFound,
+                            format!(
+                                "`{selector}` does not match the current address of {}; it is currently at {} [{}]",
+                                peer.name,
+                                self.display_peer(peer),
+                                lanfp_core::short_id(peer.device_id)
+                            ),
+                        ));
+                    }
+                    0 => {}
+                    _ => return Err(self.ambiguous_error(selector, &by_name)),
+                }
+            }
+        }
+
+        let unpaired = self.discovered_matches(selector);
+        if !unpaired.is_empty() {
+            let list = unpaired
+                .iter()
+                .map(|peer| format!("{} [{}]", peer.display(), lanfp_core::short_id(peer.uuid)))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(ipc_err(
                 ExitCode::NotPairedOrOffline,
-                format!("{} is not paired with this device", found.display()),
+                format!("not paired with this device: {list}"),
             ));
         }
         Err(ipc_err(
@@ -622,23 +855,49 @@ impl Daemon {
         ))
     }
 
-    pub fn discovery_match(&self, selector: &str) -> Option<DiscoveredPeer> {
-        let normalized = selector.trim();
-        let parsed = PeerAddr::parse(normalized).ok();
-        self.discovery.snapshot().into_iter().find(|d| {
-            d.display() == normalized
-                || d.name.eq_ignore_ascii_case(normalized)
-                || d.uuid.to_string() == normalized
-                || d.best_addr()
-                    .map(|a| a.ip().to_string() == normalized)
-                    .unwrap_or(false)
-                || parsed
-                    .as_ref()
-                    .map(|p| {
-                        d.addresses.iter().any(|ip| ip.to_string() == p.host) && p.port == d.port
-                    })
-                    .unwrap_or(false)
-        })
+    fn discovered_matches(&self, selector: &str) -> Vec<DiscoveredPeer> {
+        let s = selector.trim();
+        let full = parse_full_uuid(s);
+        let prefix = uuid_prefix(s);
+        let parsed = PeerAddr::parse(s).ok();
+        let explicit = lanfp_core::has_explicit_port(s);
+        self.discovery
+            .snapshot()
+            .into_iter()
+            .filter(|peer| {
+                if full == Some(peer.uuid) {
+                    return true;
+                }
+                if let Some(prefix) = &prefix {
+                    if peer.uuid.simple().to_string().starts_with(prefix.as_str()) {
+                        return true;
+                    }
+                }
+                if s.contains('@') {
+                    if let Some(parsed) = &parsed {
+                        if let Some(name) = &parsed.name {
+                            return peer.name.eq_ignore_ascii_case(name)
+                                && discovered_address_matches(
+                                    peer,
+                                    &parsed.host,
+                                    parsed.port,
+                                    explicit,
+                                );
+                        }
+                    }
+                    return false;
+                }
+                if peer.name.eq_ignore_ascii_case(s) {
+                    return true;
+                }
+                match &parsed {
+                    Some(parsed) if parsed.host.parse::<IpAddr>().is_ok() => {
+                        discovered_address_matches(peer, &parsed.host, parsed.port, explicit)
+                    }
+                    _ => false,
+                }
+            })
+            .collect()
     }
 
     /// Point a paired peer at a new address, e.g. after a DHCP or Wi-Fi change
@@ -694,6 +953,7 @@ impl Daemon {
         serde_json::to_value(PeerSetAddressResult {
             schema: lanfp_core::JSON_SCHEMA,
             peer: display,
+            id: peer.device_id,
             address: addr,
             online,
         })
@@ -701,12 +961,25 @@ impl Daemon {
     }
 
     pub fn pairing_target(&self, selector: &str) -> Result<PairTarget, IpcError> {
-        let peers = self.db.list_peers().map_err(internal)?;
-        if let Some(peer) = match_peer(&peers, selector) {
-            return Ok(PairTarget::Paired(peer));
+        let paired = self.paired_matches(selector)?;
+        match paired.len() {
+            1 => {
+                return Ok(PairTarget::Paired(
+                    paired.into_iter().next().expect("one match"),
+                ))
+            }
+            n if n > 1 => return Err(self.ambiguous_error(selector, &paired)),
+            _ => {}
         }
-        if let Some(found) = self.discovery_match(selector) {
-            return Ok(PairTarget::Discovered(found));
+        let discovered = self.discovered_matches(selector);
+        match discovered.len() {
+            1 => {
+                return Ok(PairTarget::Discovered(
+                    discovered.into_iter().next().expect("one match"),
+                ))
+            }
+            n if n > 1 => return Err(self.ambiguous_discovered(selector, &discovered)),
+            _ => {}
         }
         match PeerAddr::parse(selector) {
             Ok(addr) => Ok(PairTarget::Manual(addr)),
@@ -834,39 +1107,40 @@ pub enum PairTarget {
     Manual(PeerAddr),
 }
 
-fn match_peer(peers: &[PeerRecord], selector: &str) -> Option<PeerRecord> {
-    let normalized = selector.trim();
-    let parsed = PeerAddr::parse(normalized).ok();
-    peers
-        .iter()
-        .find(|p| {
-            p.display() == normalized
-                || p.name.eq_ignore_ascii_case(normalized)
-                || p.device_id.to_string() == normalized
-                || p.last_addr.as_deref() == Some(normalized)
-                || parsed
-                    .as_ref()
-                    .map(|a| {
-                        p.last_addr
-                            .as_deref()
-                            .and_then(|addr| PeerAddr::parse(addr).ok())
-                            .map(|stored| stored.host == a.host && stored.port == a.port)
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-        })
-        .cloned()
+fn parse_full_uuid(selector: &str) -> Option<Uuid> {
+    let s = selector.trim();
+    if s.len() == 32 || s.len() == 36 {
+        Uuid::parse_str(s).ok()
+    } else {
+        None
+    }
 }
 
-pub fn peer_host_port(record: &PeerRecord) -> (String, u16) {
-    match record
-        .last_addr
-        .as_deref()
-        .and_then(|addr| PeerAddr::parse(addr).ok())
-    {
-        Some(addr) => (addr.host, addr.port),
-        None => (String::new(), lanfp_core::DEFAULT_AGENT_PORT),
+fn uuid_prefix(selector: &str) -> Option<String> {
+    let s = selector.trim().to_ascii_lowercase();
+    if (UUID_PREFIX_MIN..32).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(s)
+    } else {
+        None
     }
+}
+
+fn push_unique(found: &mut Vec<Uuid>, id: Uuid) {
+    if !found.contains(&id) {
+        found.push(id);
+    }
+}
+
+fn discovered_address_matches(
+    peer: &DiscoveredPeer,
+    host: &str,
+    port: u16,
+    explicit_port: bool,
+) -> bool {
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    peer.addresses.contains(&ip) && (!explicit_port || peer.port == port)
 }
 
 pub fn rules_for_peer_snapshot(daemon: &Daemon, peer_id: Uuid) -> Vec<RuleRecord> {
@@ -942,18 +1216,6 @@ pub fn primary_ip_string() -> String {
         })
         .unwrap_or(IpAddr::from([127, 0, 0, 1]))
         .to_string()
-}
-
-/// Format an offline notice used by `lanfp remote`.
-pub fn offline_notice(offline: &[String]) -> Option<String> {
-    if offline.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "skipping offline device(s): {}",
-            offline.join(", ")
-        ))
-    }
 }
 
 /// Entry point for `lanfp serve`.

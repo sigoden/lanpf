@@ -11,7 +11,10 @@ pub mod peer;
 pub mod protocol;
 
 pub use error::ExitCode;
-pub use peer::{format_peer, sanitize_device_name, PeerAddr, PeerParseError};
+pub use peer::{
+    format_peer, has_explicit_port, sanitize_device_name, short_id, short_ids, PeerAddr,
+    PeerParseError,
+};
 
 /// Protocol version carried by `Hello` and the pairing handshake.
 pub const PROTOCOL_VERSION: u16 = 1;

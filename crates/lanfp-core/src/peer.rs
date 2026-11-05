@@ -1,14 +1,61 @@
-//! Peer identifiers (`<name>@<address>[:port]`) and device-name sanitising.
+//! Peer identifiers, UUID short forms and device-name sanitising.
 //!
-//! The user-visible device identifier is always `<name>@<address>`; internal
-//! identity uses UUIDs which are never displayed.
+//! A device's stable identity is its UUID. `<name>@<address>[:port]` is a
+//! display view that is formatted on demand, not an identity.
 
 use crate::DEFAULT_AGENT_PORT;
+use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use uuid::Uuid;
 
 /// Maximum length of a sanitised device name.
 pub const MAX_DEVICE_NAME_LEN: usize = 64;
+
+/// Stable short form of a device UUID: its first 8 lowercase hex characters.
+pub fn short_id(id: Uuid) -> String {
+    id.simple().to_string()[..8].to_string()
+}
+
+/// Short IDs for a set of devices, lengthened as needed so that every value is
+/// unique within the list. Collisions in the first 8 characters are extremely
+/// unlikely, but a table must never show two identical IDs.
+pub fn short_ids(ids: &[Uuid]) -> Vec<String> {
+    let full: Vec<String> = ids.iter().map(|id| id.simple().to_string()).collect();
+    // The same peer may appear on several table rows; only distinct devices
+    // need disambiguating.
+    let mut seen = HashSet::new();
+    let distinct: Vec<&str> = full
+        .iter()
+        .filter(|value| seen.insert(value.as_str()))
+        .map(String::as_str)
+        .collect();
+    for len in 8..=32 {
+        let prefixes: Vec<&str> = distinct.iter().map(|value| &value[..len]).collect();
+        let unique: HashSet<&str> = prefixes.iter().copied().collect();
+        if unique.len() == prefixes.len() {
+            return full.iter().map(|value| value[..len].to_string()).collect();
+        }
+    }
+    full
+}
+
+/// Whether a peer selector carried an explicit `:port`.
+///
+/// `mac-mini@192.168.8.10`, `192.168.8.10`, and `fe80::1` have no explicit
+/// port; `mac-mini@192.168.8.10:5000`, `192.168.8.10:5000`, and
+/// `[fe80::1]:5000` do.
+pub fn has_explicit_port(input: &str) -> bool {
+    let s = input.trim();
+    let rest = s.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(s);
+    if let Some(after_open) = rest.strip_prefix('[') {
+        return match after_open.find(']') {
+            Some(end) => after_open[end + 1..].starts_with(':'),
+            None => false,
+        };
+    }
+    rest.matches(':').count() == 1
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerAddr {
@@ -320,5 +367,35 @@ mod tests {
     fn format_peer_uses_sanitized_name() {
         assert_eq!(format_peer("my mac", "10.0.0.2", 47811), "my-mac@10.0.0.2");
         assert_eq!(format_peer("x", "10.0.0.2", 5000), "x@10.0.0.2:5000");
+    }
+
+    #[test]
+    fn short_ids_are_eight_chars_and_unique() {
+        let a = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let b = Uuid::parse_str("11111112-2222-4333-8444-555555555555").unwrap();
+        assert_eq!(short_id(a), "11111111");
+        assert_eq!(short_ids(&[a, b]), vec!["11111111", "11111112"]);
+
+        // Repeated occurrences of one device stay at 8 characters.
+        assert_eq!(short_ids(&[a, a]), vec!["11111111", "11111111"]);
+
+        let c = Uuid::parse_str("11111111-3333-4333-8444-555555555555").unwrap();
+        let ids = short_ids(&[a, c, a]);
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0], ids[2]);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids[0].starts_with("11111111"));
+    }
+
+    #[test]
+    fn detects_explicit_ports() {
+        assert!(!has_explicit_port("mac-mini@192.168.8.10"));
+        assert!(has_explicit_port("mac-mini@192.168.8.10:5000"));
+        assert!(!has_explicit_port("192.168.8.10"));
+        assert!(has_explicit_port("192.168.8.10:5000"));
+        assert!(!has_explicit_port("fe80::1"));
+        assert!(!has_explicit_port("[fe80::1]"));
+        assert!(has_explicit_port("[fe80::1]:5000"));
+        assert!(!has_explicit_port("mac-mini"));
     }
 }

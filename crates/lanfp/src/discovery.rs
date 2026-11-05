@@ -276,6 +276,16 @@ impl Discovery {
             .retain(|_, cached| *cached != uuid);
     }
 
+    /// Freshest mDNS address of a peer, if it was resolved within `max_age`.
+    pub fn fresh_addr(&self, uuid: Uuid, max_age: Duration) -> Option<SocketAddr> {
+        self.cache
+            .read()
+            .unwrap()
+            .get(&uuid)
+            .filter(|peer| peer.last_seen.elapsed() < max_age)
+            .and_then(|peer| peer.best_addr())
+    }
+
     /// Run a fresh browse for `timeout` and return the merged cache.
     pub async fn scan(&self, timeout: Duration) -> Vec<DiscoveredPeer> {
         if !self.enabled {

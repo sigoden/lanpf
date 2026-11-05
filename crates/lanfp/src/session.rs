@@ -219,22 +219,15 @@ impl Default for SessionRegistry {
 
 impl Daemon {
     pub async fn dial_peer(self: &Arc<Self>, peer: &PeerRecord) -> Result<()> {
-        // Prefer the freshest mDNS address so that DHCP changes and network
-        // switches are picked up without restarting the daemon.
-        let discovered_addr = self
-            .discovery
-            .snapshot()
-            .into_iter()
-            .find(|d| d.uuid == peer.device_id && d.last_seen.elapsed() < Duration::from_secs(120))
-            .and_then(|d| d.best_addr())
-            .map(|addr| addr.to_string());
-        let addr = discovered_addr
-            .or_else(|| peer.connect_addr())
+        // A fresh mDNS result wins over the stored address, so DHCP changes
+        // and network switches are picked up without restarting the daemon.
+        let addr = self
+            .current_peer_addr(peer)
             .context("peer has no known address")?;
         let pubkey = peer.pubkey_array().context("peer public key is invalid")?;
         let config = lanfp_crypto::client_config(&self.identity, pubkey)?;
         let connector = tokio_rustls::TlsConnector::from(config);
-        let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr))
+        let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
             .await
             .context("connect timeout")?
             .with_context(|| format!("connect {addr}"))?;
@@ -249,14 +242,14 @@ impl Daemon {
                 .context("TLS handshake failed")?;
         let _ = self
             .db
-            .update_peer_seen(peer.device_id, Some(&addr), now_ts());
+            .update_peer_seen(peer.device_id, Some(&addr.to_string()), now_ts());
         self.establish_session(tls, peer.clone(), true, None).await
     }
 
     pub async fn establish_session<S>(
         self: &Arc<Self>,
         stream: S,
-        peer: PeerRecord,
+        mut peer: PeerRecord,
         is_dialer: bool,
         observed_addr: Option<SocketAddr>,
     ) -> Result<()>
@@ -312,13 +305,14 @@ impl Daemon {
                 .await
                 .context("timed out waiting for session hello")?
                 .context("read session hello")?;
-        let (peer_uuid, peer_version, peer_agent_port) = match peer_hello {
+        let (peer_uuid, peer_version, peer_agent_port, peer_name) = match peer_hello {
             ControlMessage::Hello {
                 version,
                 uuid,
+                name,
                 agent_port,
                 ..
-            } => (uuid, version, agent_port),
+            } => (uuid, version, agent_port, name),
             other => bail!("unexpected first control message: {other:?}"),
         };
         if peer_uuid != peer_id {
@@ -326,6 +320,19 @@ impl Daemon {
         }
         if peer_version != PROTOCOL_VERSION {
             bail!("peer speaks protocol v{peer_version}, this build speaks v{PROTOCOL_VERSION}");
+        }
+
+        // The remote hostname is part of the peer's authenticated hello; keep
+        // the stored display name current without waiting for a re-pair.
+        let peer_name = lanfp_core::sanitize_device_name(&peer_name);
+        if peer_name != peer.name {
+            match self.db.update_peer_name(peer.device_id, &peer_name) {
+                Ok(()) => {
+                    tracing::info!("peer {peer_id} is now named `{peer_name}`");
+                    peer.name = peer_name;
+                }
+                Err(err) => tracing::warn!("cannot update peer name: {err:#}"),
+            }
         }
 
         // An inbound connection tells us where the peer currently lives. The
@@ -932,10 +939,13 @@ pub async fn session_supervisor(daemon: Arc<Daemon>) {
                             if first_failure {
                                 tracing::warn!(
                                     "cannot reach {}: {err:#}; retrying in the background",
-                                    peer.display()
+                                    daemon.display_peer(&peer)
                                 );
                             } else {
-                                tracing::debug!("dial {} failed: {err:#}", peer.display());
+                                tracing::debug!(
+                                    "dial {} failed: {err:#}",
+                                    daemon.display_peer(&peer)
+                                );
                             }
                         }
                     }
