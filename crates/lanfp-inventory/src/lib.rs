@@ -4,13 +4,20 @@
 //! state, owning PIDs); `sysinfo` resolves process name and user. Ports are
 //! merged across IPv4/IPv6 so a dual-stack listener appears once.
 //!
+//! On macOS `netstat2` silently drops sockets owned by other users (libproc's
+//! `PROC_PIDLISTFDS` needs root), so `/usr/sbin/netstat` supplies the full port
+//! set and those entries keep an unknown owner (`-`).
+//!
 //! Blind spots (documented): sockets inside other network namespaces
 //! (Docker containers, WSL2) and sockets whose owner is not visible to the
 //! current user. In those cases the port is still listed and the ownership
 //! columns show `-`.
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 use lanfp_core::protocol::{PortInfo, PortKind};
-use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
+use netstat2::{AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::IpAddr;
 use sysinfo::{ProcessesToUpdate, System, UpdateKind, Users};
@@ -56,7 +63,13 @@ impl Enumerator {
     /// Enumerate all TCP `LISTEN` sockets, merged by port and sorted by port.
     pub fn snapshot(&mut self) -> anyhow::Result<Vec<ListenerEntry>> {
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
-        let sockets = get_sockets_info(af_flags, ProtocolFlags::TCP)?;
+        // A single inaccessible socket (a process exiting mid-scan, a file
+        // descriptor we may not inspect, ...) must not fail the whole
+        // inventory, so skip per-socket errors.
+        let sockets: Vec<netstat2::SocketInfo> =
+            netstat2::iterate_sockets_info(af_flags, ProtocolFlags::TCP)?
+                .filter_map(|result| result.ok())
+                .collect();
 
         let mut merged: BTreeMap<u16, ListenerEntry> = BTreeMap::new();
         let mut pids: BTreeSet<u32> = BTreeSet::new();
@@ -86,6 +99,23 @@ impl Enumerator {
             }
             if entry.pid.is_none() {
                 entry.pid = pid;
+            }
+        }
+
+        // On macOS the crate only reports sockets of processes we can inspect;
+        // merge in the ports seen by netstat so other users' listeners are
+        // listed (without ownership).
+        #[cfg(target_os = "macos")]
+        for (port, bind) in macos::all_tcp_listeners() {
+            let entry = merged.entry(port).or_insert_with(|| ListenerEntry {
+                port,
+                bind: Vec::new(),
+                pid: None,
+                process: None,
+                user: None,
+            });
+            if !entry.bind.contains(&bind) {
+                entry.bind.push(bind);
             }
         }
 

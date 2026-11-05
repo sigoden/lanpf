@@ -7,6 +7,10 @@
 - Under user-level permissions, the PID/process name/user of other users' processes may be
   invisible. The port is still listed and its owner shows as `-`. On Linux this commonly affects
   system services such as systemd-resolved and sshd when not running as root.
+- On macOS, `netstat2` (libproc) can only read the sockets of processes owned by the current user.
+  The inventory therefore merges the full `LISTEN` set from `/usr/sbin/netstat`; ports owned by
+  root/other users are listed but their PID, process and user stay `-`. Root-owned system ports
+  below 1024 (e.g. 22) are listed normally.
 - Listeners inside Docker containers, inside WSL2, or in other network namespaces are not
   enumerated; container ports published to the host are visible, but the process attribution for
   them usually shows `-`.
@@ -65,6 +69,10 @@
 
 - Forwards changed `agent.listen` and `discovery.mdns` settings need a restart of the background
   instance; all other settings hot-reload within about 5 seconds.
+- macOS login autostart is a LaunchAgent. When `lanfp daemon install` runs from a plain SSH
+  session, macOS launchd may refuse to bootstrap any service (the session belongs to the
+  "Background" manager), so the plist is registered but only takes effect at the next GUI login;
+  the command warns about this. Running it from Terminal.app activates the agent immediately.
 - Logs rotate once at 5 MiB on each `serve` start and do not rotate while running.
 - The single-instance lock applies per `LANFP_HOME`/user runtime directory; do not run multiple
   instances for normal use.
@@ -75,14 +83,16 @@
 
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| Port enumeration | Verified | Not verified on hardware | Not verified on hardware |
-| IPC | UDS verified | UDS code path | Named pipe code path |
-| Login autostart | systemd --user verified | LaunchAgent code path | HKCU Run code path |
-| mDNS | Verified (two instances, one host) | Not verified (local network permission) | Not verified |
-| `<1024` listen | Not possible (exit code 7 verified) | Not possible | Usually possible |
+| Port enumeration | Verified | Verified on macOS 15.5 arm64 (`netstat` fallback) | Not verified on hardware |
+| IPC | UDS verified | UDS verified on macOS 15.5 (0600, runtime dir 0700) | Named pipe code path |
+| Login autostart | systemd --user verified | LaunchAgent plist verified; activation needs a GUI session | HKCU Run code path |
+| mDNS | Verified (two instances, one host) | Code path; two-host and "Local Network" permission not verified | Not verified |
+| `<1024` listen | Not possible (exit code 7 verified) | Not possible (exit code 7 verified in E2E) | Usually possible |
 
-Real-hardware M0 verification for macOS / Windows is still pending; until it is done, treat both
-platforms as "code implemented but not accepted".
+macOS M1 (serve, IPC, auto-spawn, inventory, `local`, `daemon status`) is verified on real
+hardware; macOS M2–M5 are covered by the loopback E2E suite but still need a live two-host
+check. Windows verification remains pending, so treat Windows as "code implemented but not
+accepted".
 
 ## Output Language
 

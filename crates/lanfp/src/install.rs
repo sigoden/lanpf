@@ -2,11 +2,21 @@
 
 use crate::paths::Paths;
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
+/// Outcome of `lanfp daemon install`.
+pub struct InstallOutcome {
+    /// Path of the registered autostart entry.
+    pub target: String,
+    /// Whether the daemon was also started right now, not just at next login.
+    pub started: bool,
+}
+
 #[cfg(target_os = "linux")]
-pub fn install(_paths: &Paths) -> Result<String> {
+pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
     let exe = std::env::current_exe().context("locate lanfp executable")?;
     let home_env = std::env::var("LANFP_HOME").ok();
 
@@ -33,7 +43,10 @@ pub fn install(_paths: &Paths) -> Result<String> {
             .with_context(|| format!("write {}", unit_path.display()))?;
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", "lanfp.service"])?;
-        return Ok(unit_path.display().to_string());
+        return Ok(InstallOutcome {
+            target: unit_path.display().to_string(),
+            started: true,
+        });
     }
 
     let desktop_path = autostart_desktop_path()?;
@@ -52,7 +65,10 @@ pub fn install(_paths: &Paths) -> Result<String> {
     desktop.push_str(&format!("Exec={}\n", quote_exec(&exe)));
     std::fs::write(&desktop_path, desktop)
         .with_context(|| format!("write {}", desktop_path.display()))?;
-    Ok(desktop_path.display().to_string())
+    Ok(InstallOutcome {
+        target: desktop_path.display().to_string(),
+        started: false,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -100,7 +116,7 @@ fn autostart_desktop_path() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn install(paths: &Paths) -> Result<String> {
+pub fn install(paths: &Paths) -> Result<InstallOutcome> {
     let exe = std::env::current_exe().context("locate lanfp executable")?;
     let plist_path = launch_agent_path()?;
     if let Some(parent) = plist_path.parent() {
@@ -135,12 +151,44 @@ pub fn install(paths: &Paths) -> Result<String> {
     plist.push_str("</dict>\n</plist>\n");
     std::fs::write(&plist_path, plist)
         .with_context(|| format!("write {}", plist_path.display()))?;
-    let _ = run("launchctl", &["unload", &plist_path.display().to_string()]);
-    run(
-        "launchctl",
-        &["load", "-w", &plist_path.display().to_string()],
-    )?;
-    Ok(plist_path.display().to_string())
+
+    // The plist is registered; now try to activate it. `launchctl load` is
+    // deprecated and fails silently on current macOS, so use bootstrap.
+    // A GUI (Terminal) session can use the `gui/<uid>` domain; an SSH or other
+    // background session can only try `user/<uid>`, and macOS 15 may reject
+    // both with EIO. In that case the entry still starts at the next login.
+    let uid = unsafe { libc::geteuid() };
+    let label = "com.lanfp.serve";
+    let plist_display = plist_path.display().to_string();
+    let mut started = false;
+    let mut last_error = None;
+    for domain in [format!("gui/{uid}"), format!("user/{uid}")] {
+        let _ = run("launchctl", &["bootout", &format!("{domain}/{label}")]);
+        match run("launchctl", &["bootstrap", &domain, &plist_display]) {
+            Ok(()) => {
+                let _ = run("launchctl", &["enable", &format!("{domain}/{label}")]);
+                let _ = run(
+                    "launchctl",
+                    &["kickstart", "-k", &format!("{domain}/{label}")],
+                );
+                started = true;
+                break;
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+    if !started {
+        if let Some(err) = last_error {
+            eprintln!(
+                "warning: the LaunchAgent is installed but could not be started in this \
+                 session ({err:#}); it will start at the next login"
+            );
+        }
+    }
+    Ok(InstallOutcome {
+        target: plist_display,
+        started,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -150,10 +198,13 @@ pub fn uninstall(paths: &Paths) -> Result<String> {
     if !plist_path.exists() {
         bail!("no lanfp LaunchAgent is installed");
     }
-    let _ = run(
-        "launchctl",
-        &["unload", "-w", &plist_path.display().to_string()],
-    );
+    let uid = unsafe { libc::geteuid() };
+    for domain in [format!("gui/{uid}"), format!("user/{uid}")] {
+        let _ = run(
+            "launchctl",
+            &["bootout", &format!("{domain}/com.lanfp.serve")],
+        );
+    }
     std::fs::remove_file(&plist_path)
         .with_context(|| format!("remove {}", plist_path.display()))?;
     Ok(plist_path.display().to_string())
@@ -174,7 +225,7 @@ fn xml_escape(input: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-pub fn install(_paths: &Paths) -> Result<String> {
+pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
     let exe = std::env::current_exe().context("locate lanfp executable")?;
     let command = format!("\"{}\" serve", exe.display());
     let status = Command::new("reg")
@@ -194,7 +245,10 @@ pub fn install(_paths: &Paths) -> Result<String> {
     if !status.success() {
         bail!("reg.exe failed with status {status}");
     }
-    Ok(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\lanfp".to_string())
+    Ok(InstallOutcome {
+        target: r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\lanfp".to_string(),
+        started: false,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -216,7 +270,7 @@ pub fn uninstall(_paths: &Paths) -> Result<String> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn install(_paths: &Paths) -> Result<String> {
+pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
     bail!("login autostart is not supported on this platform")
 }
 
@@ -242,11 +296,12 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         .output()
         .with_context(|| format!("run {program} {}", args.join(" ")))?;
     if !output.status.success() {
-        bail!(
-            "{program} {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            bail!("{program} {} failed ({})", args.join(" "), output.status);
+        }
+        bail!("{program} {} failed: {stderr}", args.join(" "));
     }
     Ok(())
 }

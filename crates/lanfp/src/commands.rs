@@ -472,9 +472,15 @@ async fn daemon_stop() -> Result<(), CliError> {
 
 fn install_autostart() -> Result<(), CliError> {
     let paths = paths()?;
-    let target = install::install(&paths).map_err(CliError::internal)?;
-    println!("installed login autostart: {target}");
-    println!("the daemon is enabled now; check it with `lanfp daemon status`");
+    let outcome = install::install(&paths).map_err(CliError::internal)?;
+    println!("installed login autostart: {}", outcome.target);
+    if outcome.started {
+        println!("the daemon is running; check it with `lanfp daemon status`");
+    } else {
+        println!(
+            "the daemon will start at the next login; run `lanfp daemon start` to start it now"
+        );
+    }
     Ok(())
 }
 

@@ -31,10 +31,14 @@ lanfp daemon uninstall
 | Platform | Mechanism |
 |---|---|
 | Linux | `~/.config/systemd/user/lanfp.service`, `systemctl --user enable --now`; falls back to `~/.config/autostart/lanfp.desktop` without systemd |
-| macOS | `~/Library/LaunchAgents/com.lanfp.serve.plist`, `launchctl load -w` |
+| macOS | `~/Library/LaunchAgents/com.lanfp.serve.plist`, `launchctl bootstrap gui/<uid>` (falls back to the `user/<uid>` domain) |
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\lanfp` |
 
 Autostart is not registered by default; `uninstall` stops and removes it.
+
+On macOS, when the command runs from a plain SSH session, launchd may refuse to bootstrap any
+service in that session; the plist is still installed and starts at the next GUI login, and
+`daemon install` says so. Run it from Terminal.app to activate the agent immediately.
 
 ## Firewall
 

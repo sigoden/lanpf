@@ -16,9 +16,11 @@ to the LAN is the agent port (default `0.0.0.0:47811`).
 
 ## Status
 
-Linux is fully working and passes the loopback end-to-end tests. The macOS / Windows code paths
-are implemented (IPC named pipes, LaunchAgent, HKCU Run, the `<1024` port difference), but they
-have not been verified on real hardware in the current environment; see
+Linux is fully working and passes the loopback end-to-end tests. macOS 15.5 arm64 has passed the
+M1 real-hardware acceptance checks (auto-spawn, IPC, `lanfp local` against `netstat`/`lsof`,
+daemon lifecycle, LaunchAgent registration) and the loopback end-to-end suite; two-host mDNS
+discovery still needs a live LAN check. The Windows code paths are implemented (named pipes,
+HKCU Run, the `<1024` port difference) but not verified on hardware yet; see
 [Known limitations](docs/limitations.md).
 
 ## Build
@@ -247,7 +249,8 @@ See [Security model](docs/security.md) for details.
 ## Known limitations
 
 - Under user-level permissions, the PID/process name of other users' processes may be invisible:
-  the port is still listed and its owner shows as `-`.
+  the port is still listed and its owner shows as `-`. On macOS the full port set comes from
+  `netstat` because `netstat2` cannot read other users' sockets without root.
 - Ports inside separate network namespaces such as Docker containers and WSL2 are not enumerated.
 - mDNS may be blocked by a firewall/AP isolation: pair manually with `lanfp pair <ip>[:port]`.
 - The macOS 15+ "Local Network" privacy permission may affect mDNS and outbound connections.
