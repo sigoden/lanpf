@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lanfp-core",
+    "crates/lanfp-inventory",
+    "crates/lanfp-crypto",
+    "crates/lanfp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT"
+authors = ["lanfp contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+ed25519-dalek = { version = "2.1", features = ["pkcs8", "rand_core"] }
+fs2 = "0.4"
+futures = "0.3"
+hex = "0.4"
+hkdf = "0.12"
+hostname = "0.4"
+if-addrs = "0.15"
+rpassword = "7"
+libc = "0.2"
+mdns-sd = "0.21"
+netstat2 = "0.11"
+pakery-spake2 = "0.6"
+rand = "0.8"
+rcgen = "0.13"
+rusqlite = { version = "0.41", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+spake2 = "0.4"
+sysinfo = "0.40"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+x509-parser = "0.16"
+yamux = "0.13"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

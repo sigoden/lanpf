@@ -1,0 +1,12 @@
+[package]
+name = "lanfp-inventory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lanfp-core = { path = "../lanfp-core" }
+anyhow.workspace = true
+netstat2.workspace = true
+sysinfo.workspace = true
