@@ -143,6 +143,7 @@ impl Daemon {
             token,
             code,
             timeout_secs: timeout.as_secs(),
+            max_attempts: self.config().pairing.max_attempts,
         })
         .map_err(crate::daemon::internal)
     }

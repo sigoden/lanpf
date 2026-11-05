@@ -34,10 +34,17 @@ pub enum Commands {
     /// Read-only view of who is forwarding this machine's ports.
     Inbound(JsonArgs),
     /// Run the daemon in the foreground (debugging).
-    Serve,
+    Serve(ServeArgs),
     /// Manage the background daemon.
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Detach from the console; used by the Windows login autostart entry.
+    #[arg(long, hide = true)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Args)]

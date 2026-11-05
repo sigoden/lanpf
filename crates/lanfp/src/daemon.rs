@@ -9,7 +9,9 @@ use crate::paths::Paths;
 use crate::session::{Backoff, SessionRegistry};
 use crate::util::now_ts;
 use crate::{forward, pairing, session};
-use anyhow::{bail, Context, Result};
+#[cfg(unix)]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use lanfp_core::error::ExitCode;
 use lanfp_core::ipc::*;
 use lanfp_core::peer::PeerAddr;
@@ -539,11 +541,12 @@ impl Daemon {
             .native_ports()
             .into_iter()
             .map(|p: PortInfo| {
-                let forwarded: Vec<u16> = rules
+                let mut forwarded: Vec<u16> = rules
                     .values()
                     .filter(|r| r.peer_id == record.device_id && r.target_port == p.port)
                     .map(|r| r.listen_port)
                     .collect();
+                forwarded.sort_unstable();
                 RemotePort {
                     port: p.port,
                     bind: p.bind,
@@ -888,8 +891,14 @@ pub fn offline_notice(offline: &[String]) -> Option<String> {
 }
 
 /// Entry point for `lanfp serve`.
-pub async fn serve(paths: Paths, config: Config) -> Result<()> {
+pub async fn serve(paths: Paths, config: Config, hidden: bool) -> Result<()> {
     lanfp_crypto::install_crypto_provider();
+    #[cfg(windows)]
+    if hidden {
+        hide_console();
+    }
+    #[cfg(not(windows))]
+    let _ = hidden;
     paths.ensure()?;
 
     let Some(lock) = acquire_lock(&paths)? else {
@@ -918,6 +927,16 @@ pub async fn serve(paths: Paths, config: Config) -> Result<()> {
     tracing::info!("lanfp stopping");
     daemon.cleanup();
     Ok(())
+}
+
+/// Detach from the parent console so the login autostart entry does not leave
+/// a console window on screen.
+#[cfg(windows)]
+fn hide_console() {
+    use windows_sys::Win32::System::Console::FreeConsole;
+    unsafe {
+        FreeConsole();
+    }
 }
 
 /// Validate that a listen port may be bound by a user-level process.

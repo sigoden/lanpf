@@ -91,8 +91,17 @@ impl Paths {
         }
         #[cfg(windows)]
         {
+            // The pipe name must follow the runtime directory, otherwise every
+            // `LANFP_HOME` on the machine would share one IPC endpoint and the
+            // daemons would talk to each other's clients.
+            use std::hash::{Hash, Hasher};
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-            PathBuf::from(format!(r"\\.\pipe\lanfp-{user}"))
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.runtime_dir.hash(&mut hasher);
+            PathBuf::from(format!(
+                r"\\.\pipe\lanfp-{user}-{:08x}",
+                hasher.finish() as u32
+            ))
         }
     }
 
@@ -190,6 +199,24 @@ mod tests {
         assert_eq!(paths.db_file(), home.join("data/lanfp.db"));
         assert_eq!(paths.log_file(), home.join("state/lanfp.log"));
         assert_eq!(paths.lock_file(), home.join("run/lanfp.lock"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_name_follows_the_runtime_directory() {
+        let base = Paths {
+            config_dir: PathBuf::from(r"C:\tmp\a\config"),
+            data_dir: PathBuf::from(r"C:\tmp\a\data"),
+            state_dir: PathBuf::from(r"C:\tmp\a\state"),
+            runtime_dir: PathBuf::from(r"C:\tmp\a\run"),
+        };
+        let other = Paths {
+            runtime_dir: PathBuf::from(r"C:\tmp\b\run"),
+            ..base.clone()
+        };
+        let endpoint = base.socket_endpoint().display().to_string();
+        assert!(endpoint.starts_with(r"\\.\pipe\lanfp-"), "{endpoint}");
+        assert_ne!(base.socket_endpoint(), other.socket_endpoint());
     }
 
     #[cfg(unix)]

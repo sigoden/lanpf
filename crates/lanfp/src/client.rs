@@ -131,6 +131,26 @@ pub async fn ensure_running(paths: &Paths) -> Result<bool, CliError> {
     ))
 }
 
+/// Clear the `HANDLE_FLAG_INHERIT` bit on our stdio handles so the daemon we
+/// spawn cannot keep a caller's pipe open (see `spawn_daemon`).
+#[cfg(windows)]
+fn clear_stdio_inheritance() {
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let handle = unsafe { GetStdHandle(id) };
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+            unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 pub fn spawn_daemon(paths: &Paths) -> Result<(), CliError> {
     let exe = std::env::current_exe()
         .map_err(|e| CliError::internal(format!("cannot locate the lanfp executable: {e}")))?;
@@ -176,6 +196,11 @@ pub fn spawn_daemon(paths: &Paths) -> Result<(), CliError> {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        // Every inheritable handle of this process is inherited by the child,
+        // even when its own stdio is redirected. When the caller pipes our
+        // stdout (a shell pipeline, sshd, a CI runner), the detached daemon
+        // would keep that pipe open and the caller would never see EOF.
+        clear_stdio_inheritance();
     }
 
     command.spawn().map_err(|e| {

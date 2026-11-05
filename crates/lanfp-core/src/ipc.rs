@@ -247,6 +247,7 @@ pub struct PairWaitStartResult {
     pub token: Uuid,
     pub code: String,
     pub timeout_secs: u64,
+    pub max_attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

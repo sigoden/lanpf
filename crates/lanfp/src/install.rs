@@ -4,6 +4,7 @@ use crate::paths::Paths;
 use anyhow::{bail, Context, Result};
 #[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -227,7 +228,7 @@ fn xml_escape(input: &str) -> String {
 #[cfg(target_os = "windows")]
 pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
     let exe = std::env::current_exe().context("locate lanfp executable")?;
-    let command = format!("\"{}\" serve", exe.display());
+    let command = format!("\"{}\" serve --hidden", exe.display());
     let status = Command::new("reg")
         .args([
             "add",

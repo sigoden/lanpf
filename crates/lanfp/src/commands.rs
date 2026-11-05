@@ -40,7 +40,7 @@ pub async fn dispatch(command: Commands) -> Result<(), CliError> {
             ForwardCmd::Remove(args) => forward_remove(args).await,
         },
         Commands::Inbound(args) => inbound(args).await,
-        Commands::Serve => serve().await,
+        Commands::Serve(args) => serve(args).await,
         Commands::Daemon(cmd) => match cmd {
             DaemonCmd::Start => daemon_start().await,
             DaemonCmd::Stop => daemon_stop().await,
@@ -337,7 +337,7 @@ async fn pair_wait(args: crate::cli::PairArgs) -> Result<(), CliError> {
     println!("waiting for pairing request (Ctrl-C to cancel)...");
 
     let mut announced = false;
-    let mut last_attempts: Option<u32> = None;
+    let mut last_attempts: Option<u32> = Some(started.max_attempts);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -393,11 +393,11 @@ async fn pair_wait(args: crate::cli::PairArgs) -> Result<(), CliError> {
     }
 }
 
-async fn serve() -> Result<(), CliError> {
+async fn serve(args: crate::cli::ServeArgs) -> Result<(), CliError> {
     let paths = paths()?;
     let config = Config::load_or_create(&paths.config_file()).map_err(CliError::internal)?;
     init_tracing();
-    daemon::serve(paths, config)
+    daemon::serve(paths, config, args.hidden)
         .await
         .map_err(|e| CliError::new(ExitCode::DaemonUnavailable, format!("{e:#}")))
 }

@@ -7,3 +7,6 @@ environment variable. Run them with:
 ```sh
 cargo test --workspace
 ```
+
+The file starts with `#![cfg(unix)]`, so on Windows it compiles to an empty
+test binary and only the unit tests run there.

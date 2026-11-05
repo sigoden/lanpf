@@ -194,8 +194,102 @@ Defects found and fixed during this run:
 3. **Piping output panicked.** `lanfp remote | head` panicked on `EPIPE`; the CLI now restores the
    default `SIGPIPE` disposition and terminates quietly like other Unix tools.
 
-Not covered by this run: mDNS discovery across AP client isolation, Wi-Fi power-saving multicast
-loss, and Windows (still unverified).
+Not covered by this run: mDNS discovery across AP client isolation and Wi-Fi power-saving
+multicast loss. Windows was verified in a separate run (below).
+
+## M1 Real-Hardware Acceptance (Windows 11 25H2)
+
+Date: 2026-11-05. Windows 11 25H2 (build 26300.9711), user `sigod`, a non-elevated shell in the
+Administrators group, release build. Two PowerShell check scripts asserted 40 conditions with an
+isolated `LANFP_HOME` (agent port 47911, mDNS off) and 47 conditions with the default paths
+(agent port 47811, mDNS on, HKCU Run registration); a third script asserted 8 isolation/autostart
+conditions. All passed. `cargo test --workspace` ran 53 unit tests (15 + 21 + 14 + 3);
+`cargo fmt --check` and `cargo clippy --all-targets` were clean. The loopback E2E file is
+`#![cfg(unix)]`, so Windows compiles and runs 0 of its 9 tests.
+
+Environment note: the rustup shims in `%USERPROFILE%\.cargo\bin` on this machine fail with
+`ERROR_UNTRUSTED_MOUNT_POINT` (os error 448), so builds invoked the toolchain binaries from
+`%USERPROFILE%\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin` directly. This is a
+machine setup problem, not a lanfp defect.
+
+| Area | Result |
+|---|---|
+| Auto-spawn | `lanfp local --json` with no daemon spawned `lanfp serve` and returned within the 5 s budget |
+| Port inventory | `lanfp local --json` port set == `Get-NetTCPConnection -State Listen` minus the agent port (IPv4 and IPv6 merged per port) |
+| Self exclusion | agent port 47811 absent from `lanfp local` |
+| Ownership | own listeners show PID/process/user; system listeners resolve too (`sshd.exe`, `svchost.exe`, `spoolsv.exe`, `System`, `LOCAL SERVICE`) |
+| Binds | `127.0.0.1`, `0.0.0.0`, `::1` and `::` rendered correctly |
+| Inventory refresh | a stopped test listener disappeared from the next snapshot |
+| IPC | named pipe `\\.\pipe\lanfp-<user>-<hash8>`; two `LANFP_HOME` instances ran side by side with different PIDs, pipes and agent ports |
+| Paths | `%APPDATA%\lanfp\config.toml`, `%APPDATA%\lanfp\lanfp.db`, `%APPDATA%\lanfp\identity.key`, log at `%APPDATA%\lanfp\logs\lanfp.log` |
+| Lifecycle | `daemon status` (text/JSON), `daemon start` idempotent, a second `serve` reports the existing instance and exits 0, `daemon stop` closes the pipe, removes the pid file and exits the process; restart works |
+| Login autostart | HKCU `Software\Microsoft\Windows\CurrentVersion\Run\lanfp` set to `"<exe>" serve --hidden`, written by `daemon install` and removed by `daemon uninstall` |
+| `<1024` listen | permitted for an administrator; a forward listener on port 80 served traffic |
+| `serve --hidden` | detaches from the console (`FreeConsole`) and keeps serving; this is what the HKCU entry starts |
+| Test suite | 15 + 21 + 14 + 3 unit tests pass; E2E is Unix-only (0 tests compiled) |
+
+Key commands used for the inventory comparison:
+
+```powershell
+lanfp local --json
+Get-NetTCPConnection -State Listen | ForEach-Object { $_.LocalPort } | Sort-Object -Unique
+lanfp daemon status --json
+```
+
+## Two-Host LAN Acceptance (Linux ↔ Windows)
+
+Date: 2026-11-05. Linux x86_64 (`nix`, 192.168.8.10) and Windows 11 25H2
+(`DESKTOP-N7FJS9T`, 192.168.8.8), same `/24` subnet, user-level runtime, default paths and agent
+port 47811 on both sides. Windows Defender Firewall was on for all profiles; an inbound
+`program` allow rule for `lanfp.exe` was added for the run (the equivalent of accepting the
+first-run prompt). HTTP targets were a PowerShell `TcpListener` on Windows 18100 and
+`python3 -m http.server` on Linux 18110.
+
+| Check | Result |
+|---|---|
+| mDNS discovery | `lanfp scan` found the peer in both directions on the first 3 s query, with correct `PEER`/`PORT`/`STATE` |
+| Pairing (Linux initiates) | code shown on Windows, entered on Linux; both sides completed and reported `1 paired, 1 online` |
+| Pairing (Windows initiates, manual address) | `lanfp pair 192.168.8.10:47920` against a second isolated Linux instance with mDNS off; the non-default agent port displayed as `nix@192.168.8.10:47920` |
+| Pairing without `pair wait` | exit 6 in 8 ms |
+| `pair wait` already active | second waiter exits 6 |
+| Wrong pairing code | five attempts, each exit 9; the waiter reported the decreasing attempt count (4, 3, 2; the final decrement can fall between polls) and failed after the fifth |
+| Slow code entry | a 12 s delay before entering the code still paired (the 300 s TTL applies) |
+| Pairing persistence | restarting either daemon kept `1 paired`; sessions recovered automatically |
+| `lanfp remote` | full Native inventory of the peer with ownership (`sshd.exe`, `svchost.exe`, `System`, `chrome.exe`, `python3`, ...) and the `FORWARDED` column (`-> 18100,18102`, ascending) |
+| Forward + curl | Linux `forward add ... 18100` → `curl 127.0.0.1:18100` returned the Windows body; the reverse direction (Windows → Linux 18110) returned the Linux body |
+| `--listen` | `--listen 18102` created a second rule; both listeners served traffic |
+| `<1024` listen on Windows | `--listen 80` succeeded and served traffic (on Linux, as a normal user, the same request exits 7) |
+| `forward list` / removal | removal closed the listener immediately and cleared the peer's `inbound` entry |
+| Rule recovery | rules survived restarts of both daemons and resumed as `active` |
+| Peer offline | `remote` exits 4, rules became `peer_offline`, new connections were closed immediately |
+| Target gone/recovered | rules became `target_gone` with no traffic; the port reappearing restored `active` and traffic |
+| Other exit codes | conflict 5, missing rule 3, target not in inventory 8, `<1024` on Linux 7, unknown device 3 |
+| Listener exposure | only `0.0.0.0:47811` is non-loopback on either host; forward listeners bind `127.0.0.1` |
+| JSON | `scan`/`remote`/`forward list`/`forward add`/`inbound`/`daemon status` all parse on both sides (`schema: 1`), including PowerShell `ConvertFrom-Json` |
+| Throughput + integrity | 64 MiB through a Windows→Linux forward in 7.23 s (≈8.9 MiB/s) versus 6.95 s direct on the same link (≈96 % of the direct rate); SHA-256 of the forwarded file matched the source |
+
+Defects found and fixed during this run:
+
+1. **Windows autostart leaked the caller's stdio handles.** A detached daemon inherits every
+   inheritable handle of the CLI, including a caller's stdout pipe, so `lanfp local | more`,
+   `ssh win lanfp local` and any CI capture hung until the daemon exited. The CLI now clears
+   `HANDLE_FLAG_INHERIT` on its stdio handles before spawning.
+2. **The named pipe ignored `LANFP_HOME`.** Every home shared `\\.\pipe\lanfp-<user>`, so a
+   fresh `LANFP_HOME` talked to the default daemon. The pipe name now includes a hash of the
+   runtime directory.
+3. **`lanfp remote` FORWARDED order was nondeterministic** because rules come from a `HashMap`;
+   the ports are now sorted.
+4. **The first rejected pairing attempt was not reported.** `pair wait` only printed a decreasing
+   attempt count after observing the initial maximum, so a fast first failure was swallowed. The
+   start result now carries `max_attempts` and the counter starts there.
+5. **The HKCU Run entry opened a console window** at login (`serve` is a console program). The
+   entry now starts `serve --hidden`, which calls `FreeConsole` before serving.
+
+Not covered by this run: real login activation of the HKCU Run entry (needs a GUI logon), the
+Windows Firewall first-run prompt (the rule was added explicitly), mDNS with AP client
+isolation, and the loopback E2E suite on Windows. Note that Win32-OpenSSH terminates the
+session's process tree when the SSH connection closes, so an auto-spawned daemon does not
+outlive an SSH session; that is sshd behaviour, not a lanfp defect.
 
 ## Deviations from the Plan
 
@@ -213,6 +307,9 @@ loss, and Windows (still unverified).
 | macOS IPC path | `$TMPDIR/lanfp/ctl.sock` instead of `$TMPDIR/lanfp-<uid>/ctl.sock`; `$TMPDIR` is already per-user on macOS and the directory is 0700 |
 | macOS autostart activation | `launchctl bootstrap` (gui domain, then user domain) instead of the deprecated `launchctl load -w`; a background session only registers the plist for the next login |
 | `daemon install` output | Reports whether the daemon started immediately or will start at the next login |
+| Windows IPC name | `\\.\pipe\lanfp-<user>-<hash8>` includes a hash of the runtime directory so each `LANFP_HOME` has its own daemon |
+| Windows autostart | The HKCU Run entry runs `serve --hidden`, which detaches from the console; the Windows registry entry does not carry `LANFP_HOME` |
+| Windows child handles | The CLI clears `HANDLE_FLAG_INHERIT` on stdio before spawning the daemon so a caller's pipe is not kept open |
 
 ## Follow-Up (M1–M5) Status
 
@@ -226,5 +323,8 @@ loss, and Windows (still unverified).
   target-gone and recovery states.
 - M5 wrap-up: done (rule recovery, daemon install, --json, exit codes, docs, log rotation,
   loopback tests).
-- Remaining: Wi-Fi/AP-isolation and macOS "Local Network" permission behaviour, Windows
-  verification, and the three-platform CI matrix.
+- Windows: M1 real-hardware checks and the Linux↔Windows LAN acceptance passed; remaining work is
+  real login activation of the HKCU entry, the E2E suite on Windows and the three-platform CI
+  matrix.
+- Remaining: Wi-Fi/AP-isolation and macOS "Local Network" permission behaviour, and the
+  three-platform CI matrix.

@@ -83,18 +83,33 @@
 
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| Port enumeration | Verified | Verified on macOS 15.5 arm64 (`netstat` fallback) | Not verified on hardware |
-| IPC | UDS verified | UDS verified on macOS 15.5 (0600, runtime dir 0700) | Named pipe code path |
-| Login autostart | systemd --user verified | LaunchAgent plist verified; activation needs a GUI session | HKCU Run code path |
-| mDNS | Verified (two instances, one host; Linux↔macOS LAN) | Verified between a Linux and a macOS host; "Local Network" permission behaviour still untested | Not verified |
-| Cross-host forwarding | Verified (Linux↔macOS) | Verified (Linux↔macOS) | Not verified |
-| `<1024` listen | Not possible (exit code 7 verified) | Not possible (exit code 7 verified in E2E) | Usually possible |
+| Port enumeration | Verified | Verified on macOS 15.5 arm64 (`netstat` fallback) | Verified on Windows 11 25H2 (`Get-NetTCPConnection` comparison) |
+| IPC | UDS verified | UDS verified on macOS 15.5 (0600, runtime dir 0700) | Named pipe verified on Windows 11 25H2; the name is scoped per `LANFP_HOME` |
+| Login autostart | systemd --user verified | LaunchAgent plist verified; activation needs a GUI session | HKCU Run value verified (write/remove); real login activation untested |
+| mDNS | Verified (two instances, one host; Linux↔macOS LAN) | Verified between a Linux and a macOS host; "Local Network" permission behaviour still untested | Verified between a Linux and a Windows host |
+| Cross-host forwarding | Verified (Linux↔macOS, Linux↔Windows) | Verified (Linux↔macOS) | Verified (Linux↔Windows) |
+| `<1024` listen | Not possible (exit code 7 verified) | Not possible (exit code 7 verified in E2E) | Allowed for an administrator (port 80 verified) |
 
 macOS M1 (serve, IPC, auto-spawn, inventory, `local`, `daemon status`) is verified on real
-hardware. A two-host LAN acceptance between Linux and macOS passed M2–M4 (discovery, pairing,
-remote, forwarding, removal, offline/target-gone recovery, exit codes and JSON). mDNS over Wi-Fi
-with AP isolation, the macOS "Local Network" permission prompt, and Windows verification remain
-untested; treat Windows as "code implemented but not accepted".
+hardware, and so is Windows M1 (auto-spawn, named-pipe IPC, inventory, daemon lifecycle,
+per-`LANFP_HOME` isolation, HKCU Run registration). Two-host LAN acceptance runs passed M2–M4
+(discovery, pairing, `remote`, forwarding, removal, offline/target-gone recovery, exit codes and
+JSON) between Linux and macOS and between Linux and Windows. mDNS over Wi-Fi with AP isolation,
+the macOS "Local Network" permission prompt, real login activation of the autostart entries, and
+the loopback E2E suite on Windows remain untested.
+
+Windows specifics:
+
+- The IPC endpoint is `\\.\pipe\lanfp-<user>-<hash of the runtime directory>`, so every
+  `LANFP_HOME` gets its own daemon.
+- `lanfp daemon install` writes a HKCU Run value named `lanfp` that runs `serve --hidden`; the
+  hidden flag calls `FreeConsole` so no console window stays on screen. The registry entry does
+  not carry `LANFP_HOME`, so it always starts the default data directory.
+- Win32-OpenSSH terminates the process tree of a session when the connection closes, so a daemon
+  auto-spawned by an SSH command does not outlive the session. Keep a `lanfp serve` session open
+  for long-running remote tests; a desktop logon is not affected.
+- The loopback E2E suite is `#![cfg(unix)]`; on Windows `cargo test --workspace` runs the unit
+  tests only.
 
 ## Output Language
 
