@@ -310,6 +310,43 @@ async fn large_transfer_half_close_and_concurrency() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_survives_slow_code_entry() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+
+    let wait: PairWaitStartResult = b.call_ok(Command::PairWaitStart { timeout_secs: 60 }).await;
+    let start: PairStartResult = a
+        .call_ok(Command::PairStart {
+            peer: format!("127.0.0.1:{}", b.port),
+        })
+        .await;
+
+    // A human has to read the code from the other terminal and type it; this
+    // takes longer than a network round trip and must not abort the exchange.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    let _: PairFinishResult = a
+        .call_ok(Command::PairFinish {
+            token: start.token,
+            code: wait.code.clone(),
+            force: false,
+        })
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let poll: PairWaitPollResult = b.call_ok(Command::PairWaitPoll { token: wait.token }).await;
+        match poll.state {
+            PairWaitState::Paired => break,
+            PairWaitState::Failed => panic!("pairing failed: {:?}", poll.message),
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "pairing did not complete");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.wait_online(1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_code_attempts_are_limited() {
     let a = Node::start().await;
     let b = Node::start().await;

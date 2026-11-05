@@ -247,20 +247,25 @@ impl Daemon {
                         peer: display,
                         code: session.code.clone(),
                     };
+                    // The initiator must type the code shown on this screen
+                    // before it sends the SPAKE2 message; allow up to the
+                    // remaining code TTL, not a network-sized timeout.
+                    let remaining = session.timeout.saturating_sub(session.started.elapsed());
                     Some((
                         session.code.clone(),
                         session.token,
                         session.status.clone(),
                         session.max_attempts,
+                        remaining,
                     ))
                 }
                 _ => None,
             }
         };
-        let Some((code, token, status, max_attempts)) = session else {
+        let Some((code, token, status, max_attempts, exchange_timeout)) = session else {
             reject(
                 &mut stream,
-                "no pairing request is waiting; run `lanfp pair wait` on this device",
+                "no pairing request is waiting; run `lanfp pair wait` on the peer device",
                 ExitCode::PeerNotWaiting.code(),
             )
             .await;
@@ -277,6 +282,7 @@ impl Daemon {
                 &nonce_a,
                 &pubkey_a,
                 &code,
+                exchange_timeout,
             )
             .await;
 
@@ -320,6 +326,7 @@ impl Daemon {
         nonce_a: &[u8],
         pubkey_a: &[u8],
         code: &str,
+        exchange_timeout: Duration,
     ) -> Result<PeerRecord> {
         let nonce_b = random_nonce();
         let local_pub = self.identity.public_key_bytes().to_vec();
@@ -335,7 +342,9 @@ impl Daemon {
         )
         .await?;
 
-        let spake_a = match read(stream).await? {
+        // Waiting for the initiator to type the code can take a while; the
+        // timeout is the remaining lifetime of the pairing code.
+        let spake_a = match read_with_timeout(stream, exchange_timeout).await? {
             PairMessage::SpakeA { msg } => msg,
             PairMessage::Failed { reason, code } => {
                 bail!("peer aborted pairing ({code}): {reason}")
@@ -820,7 +829,14 @@ async fn send<S: AsyncWrite + Unpin>(stream: &mut S, message: &PairMessage) -> R
 }
 
 async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<PairMessage> {
-    tokio::time::timeout(PAIR_TIMEOUT, read_json(stream))
+    read_with_timeout(stream, PAIR_TIMEOUT).await
+}
+
+async fn read_with_timeout<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    timeout: Duration,
+) -> Result<PairMessage> {
+    tokio::time::timeout(timeout, read_json(stream))
         .await
         .context("pairing message timeout")?
         .context("read pairing message")

@@ -86,13 +86,15 @@
 | Port enumeration | Verified | Verified on macOS 15.5 arm64 (`netstat` fallback) | Not verified on hardware |
 | IPC | UDS verified | UDS verified on macOS 15.5 (0600, runtime dir 0700) | Named pipe code path |
 | Login autostart | systemd --user verified | LaunchAgent plist verified; activation needs a GUI session | HKCU Run code path |
-| mDNS | Verified (two instances, one host) | Code path; two-host and "Local Network" permission not verified | Not verified |
+| mDNS | Verified (two instances, one host; Linux↔macOS LAN) | Verified between a Linux and a macOS host; "Local Network" permission behaviour still untested | Not verified |
+| Cross-host forwarding | Verified (Linux↔macOS) | Verified (Linux↔macOS) | Not verified |
 | `<1024` listen | Not possible (exit code 7 verified) | Not possible (exit code 7 verified in E2E) | Usually possible |
 
 macOS M1 (serve, IPC, auto-spawn, inventory, `local`, `daemon status`) is verified on real
-hardware; macOS M2–M5 are covered by the loopback E2E suite but still need a live two-host
-check. Windows verification remains pending, so treat Windows as "code implemented but not
-accepted".
+hardware. A two-host LAN acceptance between Linux and macOS passed M2–M4 (discovery, pairing,
+remote, forwarding, removal, offline/target-gone recovery, exit codes and JSON). mDNS over Wi-Fi
+with AP isolation, the macOS "Local Network" permission prompt, and Windows verification remain
+untested; treat Windows as "code implemented but not accepted".
 
 ## Output Language
 

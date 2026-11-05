@@ -17,11 +17,12 @@ to the LAN is the agent port (default `0.0.0.0:47811`).
 ## Status
 
 Linux is fully working and passes the loopback end-to-end tests. macOS 15.5 arm64 has passed the
-M1 real-hardware acceptance checks (auto-spawn, IPC, `lanfp local` against `netstat`/`lsof`,
-daemon lifecycle, LaunchAgent registration) and the loopback end-to-end suite; two-host mDNS
-discovery still needs a live LAN check. The Windows code paths are implemented (named pipes,
-HKCU Run, the `<1024` port difference) but not verified on hardware yet; see
-[Known limitations](docs/limitations.md).
+M1 real-hardware checks (auto-spawn, IPC, `lanfp local` against `netstat`/`lsof`, daemon
+lifecycle, LaunchAgent registration) and the loopback suite. A two-host LAN acceptance between
+Linux and macOS passed discovery, pairing, `remote`, forwarding in both directions, removal,
+offline/target-gone recovery, exit codes and JSON output. Wi-Fi/AP-isolation mDNS, the macOS
+"Local Network" permission, and Windows (code paths implemented, never run) remain unverified;
+see [Known limitations](docs/limitations.md).
 
 ## Build
 

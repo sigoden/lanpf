@@ -69,7 +69,7 @@ impl Daemon {
         let listener = match TcpListener::bind(("127.0.0.1", listen_port)).await {
             Ok(listener) => listener,
             Err(err) => {
-                return Err(map_bind_error(self, listen_port, &err));
+                return Err(map_bind_error(self, listen_port, &err).await);
             }
         };
 
@@ -193,13 +193,16 @@ impl Daemon {
     }
 }
 
-fn map_bind_error(daemon: &Daemon, port: u16, err: &std::io::Error) -> IpcError {
+async fn map_bind_error(daemon: &Daemon, port: u16, err: &std::io::Error) -> IpcError {
     if err.kind() == std::io::ErrorKind::PermissionDenied {
         return ipc_err(
             ExitCode::Permission,
             format!("permission denied binding 127.0.0.1:{port}; use a port >= 1024"),
         );
     }
+    // The cache may lag behind a listener that just appeared; refresh it so
+    // the conflict report can name the process holding the port.
+    let _ = daemon.inventory.refresh().await;
     let occupant = daemon
         .inventory
         .all()
