@@ -1,6 +1,6 @@
 //! Implementation of the CLI subcommands (client side).
 
-use crate::cli::{Commands, DaemonCmd, ForwardCmd};
+use crate::cli::{Commands, DaemonCmd, ForwardCmd, PeerCmd};
 use crate::client::{self, CliError};
 use crate::config::{parse_duration, Config};
 use crate::daemon;
@@ -32,6 +32,9 @@ pub async fn dispatch(command: Commands) -> Result<(), CliError> {
     match command {
         Commands::Scan(args) => scan(args).await,
         Commands::Pair(args) => pair(args).await,
+        Commands::Peer(cmd) => match cmd {
+            PeerCmd::SetAddress(args) => peer_set_address(args).await,
+        },
         Commands::Local(args) => local(args).await,
         Commands::Remote(args) => remote(args).await,
         Commands::Forward(cmd) => match cmd {
@@ -150,6 +153,32 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
         &["PEER", "PORT", "BIND", "PROCESS", "USER", "FORWARDED"],
         &rows,
     );
+    Ok(())
+}
+
+async fn peer_set_address(args: crate::cli::PeerSetAddressArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(
+        &paths,
+        Command::PeerSetAddress {
+            peer: args.peer,
+            address: args.address,
+        },
+        true,
+    )
+    .await?;
+    let result: PeerSetAddressResult = decode(response.data)?;
+    if args.json {
+        return print_json(&result).map_err(CliError::internal);
+    }
+    if result.online {
+        println!("updated {} (online)", result.peer);
+    } else {
+        println!(
+            "updated {} (offline; retrying in the background)",
+            result.peer
+        );
+    }
     Ok(())
 }
 

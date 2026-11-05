@@ -52,6 +52,9 @@ pub struct Daemon {
     pub listeners: Mutex<HashMap<u16, RuleListener>>,
     pub forward_ports: Arc<RwLock<HashSet<u16>>>,
     pub backoff: Mutex<HashMap<Uuid, Backoff>>,
+    /// Peers whose next supervisor tick must dial regardless of the
+    /// dialer-election delay (set by `lanfp peer set-address`).
+    pub force_dial: Mutex<HashSet<Uuid>>,
     pub pairing: pairing::PairManager,
     pub shutdown: CancellationToken,
     pub agent_listener: Mutex<Option<TcpListener>>,
@@ -138,6 +141,7 @@ impl Daemon {
             listeners: Mutex::new(HashMap::new()),
             forward_ports,
             backoff: Mutex::new(HashMap::new()),
+            force_dial: Mutex::new(HashSet::new()),
             pairing: pairing::PairManager::new(),
             shutdown: CancellationToken::new(),
             agent_listener: Mutex::new(Some(agent_listener)),
@@ -414,6 +418,9 @@ impl Daemon {
                 self.pair_wait_start_json(timeout_secs).await
             }
             Command::PairWaitPoll { token } => self.pair_wait_poll_json(token).await,
+            Command::PeerSetAddress { peer, address } => {
+                self.peer_set_address_json(peer, address).await
+            }
             Command::DaemonStop => Ok(serde_json::json!({"stopped": true})),
         };
         match result {
@@ -632,6 +639,65 @@ impl Daemon {
                     })
                     .unwrap_or(false)
         })
+    }
+
+    /// Point a paired peer at a new address, e.g. after a DHCP or Wi-Fi change
+    /// when mDNS cannot find it. The next supervisor tick dials immediately,
+    /// bypassing the usual dialer-election delay.
+    pub async fn peer_set_address_json(
+        self: &Arc<Self>,
+        selector: String,
+        address: String,
+    ) -> Result<serde_json::Value, IpcError> {
+        let peer = self.resolve_paired_peer(&selector)?;
+        let parsed = PeerAddr::parse(&address).map_err(|err| {
+            ipc_err(
+                ExitCode::Usage,
+                format!("invalid address `{address}`: {err}"),
+            )
+        })?;
+        let ip: IpAddr = parsed.host.parse().map_err(|_| {
+            ipc_err(
+                ExitCode::Usage,
+                format!(
+                    "`{}` is not an IP address; use <ip>[:port], e.g. 192.168.8.23 or [2001:db8::1]:47811",
+                    parsed.host
+                ),
+            )
+        })?;
+        if ip.is_unspecified() {
+            return Err(ipc_err(
+                ExitCode::Usage,
+                "address must be a concrete IP, not the unspecified address",
+            ));
+        }
+        if matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+            return Err(ipc_err(
+                ExitCode::Usage,
+                "IPv6 link-local addresses need a scope id, which is not supported; use a global IPv6 or IPv4 address",
+            ));
+        }
+        let addr = SocketAddr::new(ip, parsed.port).to_string();
+        self.db
+            .update_peer_seen(peer.device_id, Some(&addr), now_ts())
+            .map_err(internal)?;
+        self.reset_backoff(peer.device_id);
+        self.force_dial.lock().unwrap().insert(peer.device_id);
+        self.discovery.forget(peer.device_id);
+        tracing::info!(
+            "address for {} set to {addr}; the daemon will use it for the next dial",
+            peer.name
+        );
+
+        let online = self.sessions.get(peer.device_id).is_some();
+        let display = lanfp_core::format_peer(&peer.name, &ip.to_string(), parsed.port);
+        serde_json::to_value(PeerSetAddressResult {
+            schema: lanfp_core::JSON_SCHEMA,
+            peer: display,
+            address: addr,
+            online,
+        })
+        .map_err(internal)
     }
 
     pub fn pairing_target(&self, selector: &str) -> Result<PairTarget, IpcError> {

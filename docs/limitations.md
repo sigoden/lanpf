@@ -40,6 +40,13 @@
 - Forwarding listeners are forced to `127.0.0.1`; binding `0.0.0.0` is not supported.
 - While the peer is offline the listener stays in place but new connections are closed
   immediately; they resume automatically once the peer is back.
+- A device's address is only a transport hint. The daemon updates it from mDNS and from the
+  source of inbound sessions, and re-advertises its own addresses within about 60 seconds of an
+  interface or DHCP change. When mDNS is blocked and the address changed, use
+  `lanfp peer set-address <peer> <ip[:port]>` instead of pairing again.
+- Re-advertising after a network change unregisters and re-registers the mDNS record, so peers
+  may briefly see the device disappear from `lanfp scan`; established sessions and forwarding
+  rules are unaffected.
 - Rules exist only on the listening side; the serving side is read-only.
 - A single session carries at most 256 streams and opens at most 100 per second; a stream with no
   bytes flowing for 30 minutes is closed.

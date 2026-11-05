@@ -24,6 +24,9 @@ pub enum Commands {
     Scan(ScanArgs),
     /// Pair with a device, or wait for an incoming pairing request.
     Pair(PairArgs),
+    /// Manage paired devices.
+    #[command(subcommand)]
+    Peer(PeerCmd),
     /// List this machine's Native listening ports.
     Local(JsonArgs),
     /// List Native ports of paired devices.
@@ -87,6 +90,24 @@ pub struct RemoteArgs {
     /// Only list this peer.
     #[arg(value_name = "PEER")]
     pub peer: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PeerCmd {
+    /// Update the address used to reach a paired device.
+    SetAddress(PeerSetAddressArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PeerSetAddressArgs {
+    /// Peer selector (`<name>`, `<name>@<address>`, or `<uuid>`).
+    #[arg(value_name = "PEER")]
+    pub peer: String,
+    /// New address as `<ip>[:port]`; the port defaults to 47811.
+    #[arg(value_name = "ADDRESS")]
+    pub address: String,
     #[arg(long)]
     pub json: bool,
 }

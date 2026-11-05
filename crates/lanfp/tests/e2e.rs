@@ -585,3 +585,47 @@ async fn rules_survive_daemon_restart() {
         b"after restart".to_vec()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_set_address_updates_the_record() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let peer = pair(&a, &b).await;
+    let peer_name = peer.split('@').next().unwrap().to_string();
+    a.wait_online(1).await;
+
+    // Repoint the peer at a port that is not listening and check the CLI
+    // reports the stored address while the current session stays up.
+    let wrong_port = free_port();
+    let wrong = format!("127.0.0.1:{wrong_port}");
+    let output = a.cli(&["peer", "set-address", &peer, &wrong, "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(value["schema"], 1);
+    assert_eq!(value["address"], wrong);
+    assert_eq!(value["online"], true);
+
+    let remote: RemoteResult = a
+        .call_ok(Command::Remote {
+            peer: Some(peer_name.clone()),
+        })
+        .await;
+    assert_eq!(remote.peers[0].port, wrong_port);
+
+    // Put the real address back.
+    let good = format!("127.0.0.1:{}", b.port);
+    let output = a.cli(&["peer", "set-address", &peer_name, &good]);
+    assert!(output.status.success(), "{output:?}");
+    let remote: RemoteResult = a
+        .call_ok(Command::Remote {
+            peer: Some(peer_name.clone()),
+        })
+        .await;
+    assert_eq!(remote.peers[0].port, b.port);
+
+    // Names are not addresses, and an unknown peer is exit code 3.
+    let bad = a.cli(&["peer", "set-address", &peer_name, "lanfp.local"]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    let missing = a.cli(&["peer", "set-address", "nobody", "127.0.0.1"]);
+    assert_eq!(missing.status.code(), Some(3), "{missing:?}");
+}

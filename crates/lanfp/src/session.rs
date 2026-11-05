@@ -7,6 +7,7 @@ use anyhow::{bail, Context as _, Result};
 
 use futures::io::{AsyncRead, AsyncWrite};
 use lanfp_core::frame::{read_json, write_json};
+use lanfp_core::peer::PeerAddr;
 use lanfp_core::protocol::{ControlMessage, DataHeader, PortInfo, RuleState};
 use lanfp_core::{build_id, DATA_HEADER_LEN, PAIR_MAGIC, PROTOCOL_VERSION};
 use lanfp_crypto::tls::ed25519_pubkey_from_cert;
@@ -35,6 +36,9 @@ pub struct Backoff {
     pub attempts: u32,
     pub next: Instant,
     pub first: Instant,
+    /// Set once the first dial failure after going offline has been logged at
+    /// WARN; later failures stay at DEBUG until the next successful session.
+    pub warned: bool,
 }
 
 pub struct OpenRequest {
@@ -246,7 +250,7 @@ impl Daemon {
         let _ = self
             .db
             .update_peer_seen(peer.device_id, Some(&addr), now_ts());
-        self.establish_session(tls, peer.clone(), true).await
+        self.establish_session(tls, peer.clone(), true, None).await
     }
 
     pub async fn establish_session<S>(
@@ -254,6 +258,7 @@ impl Daemon {
         stream: S,
         peer: PeerRecord,
         is_dialer: bool,
+        observed_addr: Option<SocketAddr>,
     ) -> Result<()>
     where
         S: TokioAsyncRead + TokioAsyncWrite + Unpin + Send + 'static,
@@ -307,8 +312,13 @@ impl Daemon {
                 .await
                 .context("timed out waiting for session hello")?
                 .context("read session hello")?;
-        let (peer_uuid, peer_version) = match peer_hello {
-            ControlMessage::Hello { version, uuid, .. } => (uuid, version),
+        let (peer_uuid, peer_version, peer_agent_port) = match peer_hello {
+            ControlMessage::Hello {
+                version,
+                uuid,
+                agent_port,
+                ..
+            } => (uuid, version, agent_port),
             other => bail!("unexpected first control message: {other:?}"),
         };
         if peer_uuid != peer_id {
@@ -316,6 +326,12 @@ impl Daemon {
         }
         if peer_version != PROTOCOL_VERSION {
             bail!("peer speaks protocol v{peer_version}, this build speaks v{PROTOCOL_VERSION}");
+        }
+
+        // An inbound connection tells us where the peer currently lives. The
+        // source port is ephemeral, so the agent port comes from the hello.
+        if let Some(source) = observed_addr {
+            self.remember_observed_address(&peer, source.ip(), peer_agent_port);
         }
 
         let (control_tx, control_rx) = mpsc::channel::<ControlMessage>(256);
@@ -422,6 +438,42 @@ impl Daemon {
             .await;
 
         Ok(())
+    }
+
+    /// Remember the address an inbound session came from, so a later dial does
+    /// not keep hitting a stale one. The peer's identity is already pinned by
+    /// TLS at this point; the address is only a transport hint.
+    fn remember_observed_address(
+        &self,
+        peer: &PeerRecord,
+        observed_ip: IpAddr,
+        peer_agent_port: u16,
+    ) {
+        if observed_ip.is_unspecified() {
+            return;
+        }
+        // IPv6 link-local addresses need a scope id, which the stored
+        // `<name>@<address>` form cannot carry.
+        if matches!(observed_ip, IpAddr::V6(v6) if v6.is_unicast_link_local()) {
+            return;
+        }
+        let addr = SocketAddr::new(observed_ip, peer_agent_port);
+        let current = peer
+            .last_addr
+            .as_deref()
+            .and_then(|raw| PeerAddr::parse(raw).ok())
+            .and_then(|parsed| parsed.socket_addr());
+        if current == Some(addr) {
+            return;
+        }
+        let _ = self
+            .db
+            .update_peer_seen(peer.device_id, Some(&addr.to_string()), now_ts());
+        tracing::info!(
+            "peer {} connected from {}; remembered it as the peer address",
+            peer.name,
+            addr
+        );
     }
 
     async fn session_closed(self: &Arc<Self>, peer_id: Uuid, session_id: Uuid) {
@@ -797,7 +849,7 @@ impl Daemon {
                 .db
                 .peer_by_pubkey(&pubkey)?
                 .context("TLS peer is not a paired device")?;
-            self.establish_session(tls, peer, false).await?;
+            self.establish_session(tls, peer, false, Some(addr)).await?;
             return Ok(());
         }
 
@@ -827,6 +879,11 @@ pub async fn session_supervisor(daemon: Arc<Daemon>) {
                     }
                 };
                 for peer in peers {
+                    let forced = daemon
+                        .force_dial
+                        .lock()
+                        .unwrap()
+                        .remove(&peer.device_id);
                     if daemon.sessions.get(peer.device_id).is_some() {
                         daemon.backoff.lock().unwrap().remove(&peer.device_id);
                         continue;
@@ -838,8 +895,9 @@ pub async fn session_supervisor(daemon: Arc<Daemon>) {
                             attempts: 0,
                             next: now,
                             first: now,
+                            warned: false,
                         });
-                        let local_is_dialer = daemon.device_id < peer.device_id;
+                        let local_is_dialer = forced || daemon.device_id < peer.device_id;
                         let fallback = now.duration_since(entry.first) > Duration::from_secs(30);
                         if (!local_is_dialer && !fallback) || now < entry.next {
                             false
@@ -859,7 +917,26 @@ pub async fn session_supervisor(daemon: Arc<Daemon>) {
                             daemon.backoff.lock().unwrap().remove(&peer.device_id);
                         }
                         Err(err) => {
-                            tracing::debug!("dial {} failed: {err:#}", peer.display());
+                            // WARN on the online -> offline transition only;
+                            // repeated retries would otherwise flood the log.
+                            let first_failure = {
+                                let mut backoff = daemon.backoff.lock().unwrap();
+                                match backoff.get_mut(&peer.device_id) {
+                                    Some(entry) if !entry.warned => {
+                                        entry.warned = true;
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            };
+                            if first_failure {
+                                tracing::warn!(
+                                    "cannot reach {}: {err:#}; retrying in the background",
+                                    peer.display()
+                                );
+                            } else {
+                                tracing::debug!("dial {} failed: {err:#}", peer.display());
+                            }
                         }
                     }
                 }

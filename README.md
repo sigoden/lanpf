@@ -125,6 +125,22 @@ PEER                    MY PORT   PEER LISTEN   SINCE    LAST SEEN   STATE
 mac-mini@192.168.8.10   3000      3000          2m ago   3s ago      online
 ```
 
+### 4. When a peer's address changes
+
+A device is identified by its UUID and pinned key, so a new IP address does not create a new
+device. The daemon refreshes the stored address from mDNS and from inbound sessions, and
+re-advertises its own addresses within about 60 seconds of an interface or DHCP change. If mDNS
+is blocked, set the address explicitly instead of pairing again:
+
+```sh
+A$ lanfp peer set-address mac-mini 192.168.8.23
+updated mac-mini@192.168.8.23 (online)
+```
+
+The port defaults to 47811; use `<ip>:47811` for a non-default agent port. `--json` prints
+`{schema, peer, address, online}`. An established session is left untouched; the new address is
+used for the next dial (the next supervisor tick if the peer is offline).
+
 ## Command reference
 
 | Command | Description |
@@ -132,6 +148,7 @@ mac-mini@192.168.8.10   3000      3000          2m ago   3s ago      online
 | `lanfp scan [--timeout 3s] [--json]` | Live mDNS scan, lists devices |
 | `lanfp pair <peer> [--code <code>] [--force] [--json]` | Initiate pairing |
 | `lanfp pair wait [--timeout 300s]` | Wait for a pairing request and show the 6-digit code |
+| `lanfp peer set-address <peer> <ip[:port]> [--json]` | Update the stored address of a paired device |
 | `lanfp local [--json]` | Local **Native** service ports |
 | `lanfp remote [peer] [--json]` | Native ports of paired devices; without `peer`, lists all online devices |
 | `lanfp forward add <peer> <target_port> [--listen <port>] [--json]` | Create a forward |

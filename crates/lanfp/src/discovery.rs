@@ -9,9 +9,14 @@ use lanfp_core::{sanitize_device_name, DEFAULT_AGENT_PORT, MDNS_SERVICE_TYPE};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// How often the advertised address set is re-checked. A change (Wi-Fi to
+/// Ethernet, DHCP renewal, VPN flap) unregisters and re-registers the record,
+/// which also withdraws the stale A/AAAA records on the peers.
+const ADVERTISE_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredPeer {
@@ -43,12 +48,21 @@ impl DiscoveredPeer {
     }
 }
 
+struct Advertised {
+    fullname: String,
+    addrs: Vec<IpAddr>,
+}
+
 pub struct Discovery {
     enabled: bool,
     cache: Arc<RwLock<HashMap<Uuid, DiscoveredPeer>>>,
     fullname_index: Arc<RwLock<HashMap<String, Uuid>>>,
     daemon: Mutex<Option<ServiceDaemon>>,
     self_uuid: Uuid,
+    /// What is currently advertised, used to detect address changes.
+    advertised: Mutex<Option<Advertised>>,
+    stop: Mutex<bool>,
+    stop_cv: Condvar,
 }
 
 impl Discovery {
@@ -59,6 +73,9 @@ impl Discovery {
             fullname_index: Arc::new(RwLock::new(HashMap::new())),
             daemon: Mutex::new(None),
             self_uuid,
+            advertised: Mutex::new(None),
+            stop: Mutex::new(false),
+            stop_cv: Condvar::new(),
         })
     }
 
@@ -67,7 +84,8 @@ impl Discovery {
     }
 
     /// Start advertising and browsing. Returns an error only for fatal setup
-    /// problems; a missing non-loopback address simply disables advertising.
+    /// problems; a missing non-loopback address simply disables advertising
+    /// until one appears.
     pub fn start(self: &Arc<Self>, name: &str, agent_port: u16) -> Result<()> {
         if !self.enabled {
             return Ok(());
@@ -76,46 +94,30 @@ impl Discovery {
 
         let addresses = local_advertise_addresses();
         if addresses.is_empty() {
-            tracing::warn!("no non-loopback address found; mDNS advertising disabled");
+            tracing::warn!(
+                "no non-loopback address found; mDNS advertising will start once one appears"
+            );
         } else {
-            let hostname = hostname::get()
-                .map(|h| h.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "lanfp".into());
-            let host_name = format!(
-                "{}.local.",
-                hostname.trim_end_matches('.').trim_end_matches(".local")
-            );
-            let instance = format!(
-                "{}-{}",
-                sanitize_device_name(name),
-                &self.self_uuid.simple().to_string()[..8]
-            );
-            let id = self.self_uuid.to_string();
-            let port = agent_port.to_string();
-            let props = [
-                ("id", id.as_str()),
-                ("nm", name),
-                ("v", "1"),
-                ("p", port.as_str()),
-            ];
-            match ServiceInfo::new(
-                MDNS_SERVICE_TYPE,
-                &instance,
-                &host_name,
-                addresses.as_slice(),
-                agent_port,
-                &props[..],
-            ) {
-                Ok(info) => match daemon.register(info) {
-                    Ok(()) => tracing::info!(
-                        "advertising {} on port {} ({} address(es))",
-                        MDNS_SERVICE_TYPE,
-                        agent_port,
-                        addresses.len()
-                    ),
-                    Err(err) => tracing::warn!("cannot register mDNS service: {err}"),
-                },
-                Err(err) => tracing::warn!("cannot build mDNS service info: {err}"),
+            match self.service_info(name, agent_port, &addresses) {
+                Ok(info) => {
+                    let fullname = info.get_fullname().to_string();
+                    match daemon.register(info) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "advertising {} on port {} ({} address(es))",
+                                MDNS_SERVICE_TYPE,
+                                agent_port,
+                                addresses.len()
+                            );
+                            *self.advertised.lock().unwrap() = Some(Advertised {
+                                fullname,
+                                addrs: addresses.clone(),
+                            });
+                        }
+                        Err(err) => tracing::warn!("cannot register mDNS service: {err}"),
+                    }
+                }
+                Err(err) => tracing::warn!("cannot build mDNS service info: {err:#}"),
             }
         }
 
@@ -135,19 +137,143 @@ impl Discovery {
             .context("spawn mDNS thread")?;
 
         *self.daemon.lock().unwrap() = Some(daemon);
+
+        // Re-advertise after network changes: the address set is re-read on a
+        // fixed interval, and re-registration withdraws the stale records.
+        let discovery = self.clone();
+        let device_name = name.to_string();
+        std::thread::Builder::new()
+            .name("lanfp-mdns-adv".into())
+            .spawn(move || discovery.maintain_advertisement(&device_name, agent_port))
+            .context("spawn mDNS advertisement thread")?;
+
         Ok(())
     }
 
     pub fn shutdown(&self) {
+        *self.stop.lock().unwrap() = true;
+        self.stop_cv.notify_all();
         if let Some(daemon) = self.daemon.lock().unwrap().take() {
             let _ = daemon.shutdown();
         }
+    }
+
+    fn maintain_advertisement(&self, name: &str, agent_port: u16) {
+        loop {
+            let stop = self.stop.lock().unwrap();
+            let (stop, _) = self
+                .stop_cv
+                .wait_timeout(stop, ADVERTISE_REFRESH)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *stop {
+                return;
+            }
+            drop(stop);
+            self.refresh_advertisement(name, agent_port);
+        }
+    }
+
+    fn refresh_advertisement(&self, name: &str, agent_port: u16) {
+        if *self.stop.lock().unwrap() {
+            return;
+        }
+        let addrs = local_advertise_addresses();
+        {
+            let advertised = self.advertised.lock().unwrap();
+            let unchanged = match advertised.as_ref() {
+                Some(current) => current.addrs == addrs,
+                None => addrs.is_empty(),
+            };
+            if unchanged {
+                return;
+            }
+        }
+
+        let Some(daemon) = self.daemon.lock().unwrap().clone() else {
+            return;
+        };
+        if let Some(old) = self.advertised.lock().unwrap().take() {
+            if let Ok(status) = daemon.unregister(&old.fullname) {
+                let _ = status.recv_timeout(Duration::from_secs(2));
+            }
+        }
+        if addrs.is_empty() {
+            tracing::warn!("no non-loopback address left; mDNS advertising stopped");
+            return;
+        }
+
+        let info = match self.service_info(name, agent_port, &addrs) {
+            Ok(info) => info,
+            Err(err) => {
+                tracing::warn!("cannot rebuild mDNS service info: {err:#}");
+                return;
+            }
+        };
+        let fullname = info.get_fullname().to_string();
+        match daemon.register(info) {
+            Ok(()) => {
+                let shown: Vec<String> = addrs.iter().map(|ip| ip.to_string()).collect();
+                tracing::info!(
+                    "mDNS address changed; re-advertising on {}",
+                    shown.join(", ")
+                );
+                *self.advertised.lock().unwrap() = Some(Advertised { fullname, addrs });
+            }
+            Err(err) => tracing::warn!("cannot re-register mDNS service: {err}"),
+        }
+    }
+
+    fn service_info(
+        &self,
+        name: &str,
+        agent_port: u16,
+        addresses: &[IpAddr],
+    ) -> Result<ServiceInfo> {
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "lanfp".into());
+        let host_name = format!(
+            "{}.local.",
+            hostname.trim_end_matches('.').trim_end_matches(".local")
+        );
+        let instance = format!(
+            "{}-{}",
+            sanitize_device_name(name),
+            &self.self_uuid.simple().to_string()[..8]
+        );
+        let id = self.self_uuid.to_string();
+        let port = agent_port.to_string();
+        let props = [
+            ("id", id.as_str()),
+            ("nm", name),
+            ("v", "1"),
+            ("p", port.as_str()),
+        ];
+        ServiceInfo::new(
+            MDNS_SERVICE_TYPE,
+            &instance,
+            &host_name,
+            addresses,
+            agent_port,
+            &props[..],
+        )
+        .context("build mDNS service info")
     }
 
     pub fn snapshot(&self) -> Vec<DiscoveredPeer> {
         let mut peers: Vec<DiscoveredPeer> = self.cache.read().unwrap().values().cloned().collect();
         peers.sort_by(|a, b| a.name.cmp(&b.name).then(a.uuid.cmp(&b.uuid)));
         peers
+    }
+
+    /// Drop a cached peer, e.g. after `lanfp peer set-address` so the explicit
+    /// address wins over a stale mDNS result.
+    pub fn forget(&self, uuid: Uuid) {
+        self.cache.write().unwrap().remove(&uuid);
+        self.fullname_index
+            .write()
+            .unwrap()
+            .retain(|_, cached| *cached != uuid);
     }
 
     /// Run a fresh browse for `timeout` and return the merged cache.

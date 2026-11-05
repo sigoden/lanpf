@@ -58,6 +58,11 @@ pub enum Command {
     PairWaitPoll {
         token: Uuid,
     },
+    /// Override the address used to reach an already paired device.
+    PeerSetAddress {
+        peer: String,
+        address: String,
+    },
     DaemonStop,
 }
 
@@ -266,6 +271,16 @@ pub struct PairFinishResult {
     pub address: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerSetAddressResult {
+    pub schema: u32,
+    /// `<name>@<new address>` of the updated peer.
+    pub peer: String,
+    /// New `ip:port` used for future dials.
+    pub address: String,
+    pub online: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairWaitState {
@@ -336,6 +351,10 @@ mod tests {
             Command::PairCancel { token: Uuid::nil() },
             Command::PairWaitStart { timeout_secs: 300 },
             Command::PairWaitPoll { token: Uuid::nil() },
+            Command::PeerSetAddress {
+                peer: "a@1.2.3.4".into(),
+                address: "10.0.0.2:47811".into(),
+            },
             Command::DaemonStop,
         ];
         for cmd in cmds {
