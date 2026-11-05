@@ -1,4 +1,9 @@
-# M0 Prototype Conclusions
+# Verification and Milestone Log
+
+This file records the M0 go/no-go evidence, real-hardware acceptance runs, deviations from
+`PLAN.md` and the milestone status. It is updated as verification progresses.
+
+## M0 Prototype Conclusions
 
 - Date: 2026-11-05
 - Environment: Linux x86_64, rustc 1.99.1, cargo 1.99.1, user-level runtime (non-root); macOS
@@ -6,7 +11,7 @@
 - Conclusion: **Linux GO** and **macOS GO for M1** (real hardware); the Windows code path is
   implemented, but real-hardware verification is still pending.
 
-## Dependency Pinning
+### Dependency Pinning
 
 | Purpose | crate | Version |
 |---|---|---|
@@ -24,9 +29,9 @@
 | SPAKE2 | spake2 | 0.4.0 (RustCrypto, Ed25519 group) |
 | AEAD / KDF | chacha20poly1305 / hkdf / sha2 | 0.10 / 0.12 / 0.10 |
 
-## Prototype Point Results
+### Prototype Point Results
 
-### 1. User-Level Port Enumeration Coverage
+#### 1. User-Level Port Enumeration Coverage
 
 - On Linux, `netstat2` returns TCP `LISTEN` sockets via netlink, with port coverage identical to
   `ss -ltn`.
@@ -49,7 +54,7 @@ excluded), with correct PID/process/user for same-user listeners and `-` for roo
 Conclusion: GO. The implementation lives in `crates/lanfp-inventory`; unit tests cover PID
 attribution of self-created listeners and the macOS netstat parser.
 
-### 2. mDNS Mutual Discovery Between Two Instances
+#### 2. mDNS Mutual Discovery Between Two Instances
 
 - `mdns-sd` 0.21.7 completed advertise + browse between two isolated instances on the same host;
   `lanfp scan --timeout 3s` listed the peer within 3 seconds with correct `PEER`, `PORT` and
@@ -62,7 +67,7 @@ attribution of self-created listeners and the macOS netstat parser.
 Conclusion: GO (verified on a single Linux host). Cross-host mDNS and macOS permissions await
 real-hardware verification in M2/M5.
 
-### 3. SPAKE2
+#### 3. SPAKE2
 
 - Uses `spake2` 0.4.0 (Ed25519 group). Unit tests cover:
   - same code → both sides derive the same key;
@@ -78,7 +83,7 @@ real-hardware verification in M2/M5.
 Conclusion: GO, with the notes above. The pairing flow passes the loopback end-to-end tests
 (including the 5-attempt limit on wrong codes).
 
-### 4. rustls Pinned Ed25519 Public Keys + yamux Throughput
+#### 4. rustls Pinned Ed25519 Public Keys + yamux Throughput
 
 - Mutual self-signed certificates, pinned by Ed25519 public key (the client pins the target's key;
   the server validates clients against the known-key set).
@@ -97,7 +102,7 @@ Conclusion: GO, with the notes above. The pairing flow passes the loopback end-t
 
 Conclusion: GO.
 
-### 5. Auto-Spawn, IPC, Single Instance
+#### 5. Auto-Spawn, IPC, Single Instance
 
 - Linux: when the daemon is not running, the client spawns `lanfp serve` detached and connects to
   IPC within 5 seconds.

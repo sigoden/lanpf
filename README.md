@@ -274,4 +274,4 @@ classification, SPAKE2, AEAD and TLS public-key pinning; `crates/lanfp/tests/e2e
 sessions, a 4 MiB transfer, half-close, 16 concurrent streams, rule recovery after restart, exit
 codes and IPC permissions against two isolated daemons plus an echo service.
 
-See [docs/M0.md](docs/M0.md) for the M0 prototype conclusions and dependency versions.
+See [docs/verification.md](docs/verification.md) for the M0 prototype conclusions, dependency versions, real-hardware acceptance runs and deviations.
