@@ -52,7 +52,7 @@ expose_ports = ["80", "443", "3000-4000", "8000-8100"]
 ```
 
 - The daemon applies `agent.expose_ports` changes within about 5 seconds and re-advertises the view; an invalid entry fails startup or is ignored on hot reload.
-- Whitelisted ports need not be listening: they stay exposed and start forwarding once a service binds them, and ranges cover any listening port inside them. The agent port is never exposed, even inside a range; forwarding listeners are never valid targets either.
+- Whitelisted ports need not be listening: they stay exposed and start forwarding once a service binds them, and ranges cover any listening port inside them. The agent port is never exposed, even inside a range; `forward add` rejects it with exit 8. Forwarding listeners are never valid targets either.
 - On the consumer, `remote` lists every listening port in all mode; in whitelist mode it lists listening whitelisted ports plus the configured ranges, and `forward add` accepts a non-listening target as `target_gone` until it listens.
 
 ## Peer identifiers and selectors
@@ -106,7 +106,7 @@ Every data command's `--json` prints one object with `schema: 2`; errors go to s
 |---|---|
 | 0 | Success |
 | 2 | Invalid arguments (including `agent.expose_ports`) or ambiguous peer selector |
-| 3 | Device or rule not found |
+| 3 | Device, rule or autostart entry not found |
 | 4 | Not authorized, not a known server, or offline |
 | 5 | Listen port in use / bind failure |
 | 7 | Privileged port (`<1024`) |

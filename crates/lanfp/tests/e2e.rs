@@ -826,6 +826,17 @@ async fn expose_whitelist_from_config_and_non_listening() {
     assert!(!ports.contains(&p2));
     assert!(!ports.contains(&p3));
 
+    // A listening port that is also a one-port whitelist entry is listed once,
+    // not again as a range row.
+    let text = a.cli(&["remote"]);
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    let p1_text = p1.to_string();
+    let rows = stdout
+        .lines()
+        .filter(|line| line.split_whitespace().nth(2) == Some(p1_text.as_str()))
+        .count();
+    assert_eq!(rows, 1, "{stdout}");
+
     // The whitelist may contain a port before it listens.
     let listen_port = free_port();
     let added: ForwardAddResult = a
@@ -928,6 +939,47 @@ async fn expose_range_covers_non_listening_ports() {
         echo_roundtrip(listen_future, b"recovered"),
         b"recovered".to_vec()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_add_rejects_the_agent_port_inside_a_whitelist_range() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let peer = pair(&a, &b).await;
+    a.wait_online(1).await;
+
+    // The range covers the host's agent port, so the exposure check alone
+    // would accept it; the agent port itself must still be rejected.
+    let lo = b.port.saturating_sub(1);
+    let hi = b.port.saturating_add(1);
+    let config = format!(
+        "[agent]\nlisten = \"127.0.0.1:{}\"\nexpose_ports = [\"{lo}-{hi}\"]\n\n[discovery]\nmdns = false\n\n[inventory]\ninterval_ms = 200\n",
+        b.port
+    );
+    std::fs::write(b.home.path().join("config/config.toml"), config).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+        if remote.peers[0].mode == ExposeMode::Whitelist {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "whitelist did not reach the consumer in time"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let err = a
+        .call_err(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: b.port,
+            listen: Some(free_port()),
+        })
+        .await;
+    assert_eq!(err.code, 8, "{err:?}");
+    assert!(err.message.contains("agent port"), "{err:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

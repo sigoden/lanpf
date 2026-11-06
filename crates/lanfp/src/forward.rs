@@ -63,6 +63,16 @@ impl Daemon {
         }
         let peer = self.resolve_dialable_or_learn(&peer_selector).await?;
         let handle = self.ensure_online(&peer).await?;
+        if target_port == handle.peer_agent_port {
+            return Err(ipc_err(
+                ExitCode::TargetNotExposed,
+                format!(
+                    "port {target_port} is the agent port of {} [{}]; it is never exposed",
+                    self.display_peer(&peer),
+                    lanfp_core::short_id(peer.device_id)
+                ),
+            ));
+        }
         if !peer_exposes_port(&handle, target_port) {
             return Err(ipc_err(
                 ExitCode::TargetNotExposed,

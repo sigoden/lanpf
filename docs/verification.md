@@ -41,7 +41,7 @@ A macOS 15.5 (Apple silicon) machine and a Windows 11 VM were paired over a swit
 | Lifecycle | Rules, identity, trust and whitelist survived daemon restarts. A second `serve` exited with "already running". Windows `daemon install` wrote the HKCU Run entry with `serve --hidden`; the macOS LaunchAgent plist was written and removed correctly and still warned that an SSH session cannot bootstrap it. |
 | Exit codes | 0, 2, 3, 4, 5, 7 and 8 verified on both platforms. Windows allows `forward add --listen 80`; an occupied high port exits 5 and names the occupant. |
 
-Two defects were found and fixed during the run:
+Defects found during the run and fixed:
 
 - mDNS advertised every interface address regardless of the agent's bind family. With the default
   `0.0.0.0` listener the agent is IPv4-only, yet peers could resolve an AAAA record; after a host
@@ -51,13 +51,13 @@ Two defects were found and fixed during the run:
 - Windows reports a reserved or occupied port as `WSAEACCES`. `forward add --listen 445` therefore
   exited 7 with a "use a port >= 1024" hint; a permission-denied bind now maps to exit 7 only below
   port 1024, and other conflicts exit 5.
+- `forward add` accepted a peer's agent port as the target when a whitelist range covered it,
+  creating a rule that could never become active; the peer's announced agent port is now rejected
+  with exit 8.
+- `remote` printed a listening whitelisted port twice; a one-port range already listed as a
+  listening port is no longer repeated.
+- `daemon uninstall` with nothing installed exited 10 ("daemon unavailable"); it now exits 3.
 
-Remaining rough edges, not changed in this run:
-
-- `forward add` accepts a peer's agent port as the target when a whitelist range covers it; the rule
-  stays `target_gone` forever because the data plane refuses the agent port.
-- `remote` prints a listening whitelisted port twice: once as a listening row and once as its
-  configured range.
-- `daemon uninstall` with nothing installed exits 10 ("daemon unavailable") instead of 3.
-- On a Windows Public network profile, inbound is blocked by default; a daemon started from SSH or
-  autostart cannot show the firewall prompt, so the agent port rule must be added manually.
+One operational caveat remains: on a Windows Public network profile, inbound is blocked by
+default; a daemon started from SSH or autostart cannot show the firewall prompt, so the agent port
+rule must be added manually.

@@ -51,7 +51,7 @@ pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn uninstall(paths: &Paths) -> Result<String> {
+pub fn uninstall(paths: &Paths) -> Result<Option<String>> {
     let _ = paths;
     let unit_path = systemd_unit_path()?;
     if unit_path.exists() {
@@ -62,15 +62,15 @@ pub fn uninstall(paths: &Paths) -> Result<String> {
         std::fs::remove_file(&unit_path)
             .with_context(|| format!("remove {}", unit_path.display()))?;
         let _ = run("systemctl", &["--user", "daemon-reload"]);
-        return Ok(unit_path.display().to_string());
+        return Ok(Some(unit_path.display().to_string()));
     }
     let desktop_path = autostart_desktop_path()?;
     if desktop_path.exists() {
         std::fs::remove_file(&desktop_path)
             .with_context(|| format!("remove {}", desktop_path.display()))?;
-        return Ok(desktop_path.display().to_string());
+        return Ok(Some(desktop_path.display().to_string()));
     }
-    bail!("no lanfp autostart entry is installed")
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]
@@ -208,11 +208,11 @@ pub fn install(paths: &Paths) -> Result<InstallOutcome> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn uninstall(paths: &Paths) -> Result<String> {
+pub fn uninstall(paths: &Paths) -> Result<Option<String>> {
     let _ = paths;
     let plist_path = launch_agent_path()?;
     if !plist_path.exists() {
-        bail!("no lanfp LaunchAgent is installed");
+        return Ok(None);
     }
     let uid = unsafe { libc::geteuid() };
     for domain in [format!("gui/{uid}"), format!("user/{uid}")] {
@@ -223,7 +223,7 @@ pub fn uninstall(paths: &Paths) -> Result<String> {
     }
     std::fs::remove_file(&plist_path)
         .with_context(|| format!("remove {}", plist_path.display()))?;
-    Ok(plist_path.display().to_string())
+    Ok(Some(plist_path.display().to_string()))
 }
 
 #[cfg(target_os = "macos")]
@@ -268,7 +268,7 @@ pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn uninstall(_paths: &Paths) -> Result<String> {
+pub fn uninstall(_paths: &Paths) -> Result<Option<String>> {
     let status = Command::new("reg")
         .args([
             "delete",
@@ -277,12 +277,15 @@ pub fn uninstall(_paths: &Paths) -> Result<String> {
             "lanfp",
             "/f",
         ])
-        .status()
+        .output()
         .context("run reg.exe")?;
-    if !status.success() {
-        bail!("no lanfp autostart entry is installed");
+    if !status.status.success() {
+        // reg.exe also fails when the value is already absent.
+        return Ok(None);
     }
-    Ok(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\lanfp".to_string())
+    Ok(Some(
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run\lanfp".to_string(),
+    ))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -291,7 +294,7 @@ pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn uninstall(_paths: &Paths) -> Result<String> {
+pub fn uninstall(_paths: &Paths) -> Result<Option<String>> {
     bail!("login autostart is not supported on this platform")
 }
 

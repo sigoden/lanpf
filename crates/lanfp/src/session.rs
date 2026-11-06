@@ -107,6 +107,8 @@ pub struct SessionHandle {
     pub id: Uuid,
     pub peer_id: Uuid,
     pub peer_name: String,
+    /// Agent port the peer announced in its session hello; never exposed.
+    pub peer_agent_port: u16,
     pub dialer_uuid: Uuid,
     inventory: RwLock<Vec<PortInfo>>,
     exposure: RwLock<ExposureView>,
@@ -372,6 +374,7 @@ impl Daemon {
             id: Uuid::new_v4(),
             peer_id,
             peer_name: peer.name.clone(),
+            peer_agent_port,
             dialer_uuid: if is_dialer { self.device_id } else { peer_id },
             inventory: RwLock::new(Vec::new()),
             exposure: RwLock::new(ExposureView::default()),

@@ -394,8 +394,13 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
             ]);
         }
         // Whitelist ranges may cover ports that are not listening; surface
-        // them so the consumer learns the server's exposure policy.
+        // them so the consumer learns the server's exposure policy. A single
+        // port already listed above is not repeated as a one-port range.
+        let listed_ports: Vec<u16> = peer.ports.iter().map(|p| p.port).collect();
         for range in &peer.ranges {
+            if range.lo == range.hi && listed_ports.contains(&range.lo) {
+                continue;
+            }
             ids.push(peer.id);
             rows.push(vec![
                 peer.peer.clone(),
@@ -640,6 +645,35 @@ fn install_autostart() -> Result<(), CliError> {
 fn uninstall_autostart() -> Result<(), CliError> {
     let paths = paths()?;
     let target = install::uninstall(&paths).map_err(CliError::internal)?;
-    println!("removed login autostart: {target}");
-    Ok(())
+    uninstall_result(target)
+}
+
+fn uninstall_result(target: Option<String>) -> Result<(), CliError> {
+    match target {
+        Some(target) => {
+            println!("removed login autostart: {target}");
+            Ok(())
+        }
+        None => Err(CliError::new(
+            ExitCode::DeviceNotFound,
+            "no login autostart entry is installed",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_without_an_entry_is_not_found() {
+        let err = uninstall_result(None).expect_err("missing autostart entry must fail");
+        assert_eq!(err.code, ExitCode::DeviceNotFound);
+        assert!(err.message.contains("no login autostart"));
+    }
+
+    #[test]
+    fn uninstall_with_an_entry_succeeds() {
+        uninstall_result(Some("unit".into())).expect("removing an entry succeeds");
+    }
 }
