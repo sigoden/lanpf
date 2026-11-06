@@ -33,6 +33,12 @@ const DISCOVERY_FRESH: Duration = Duration::from_secs(120);
 /// Shortest accepted UUID prefix.
 const UUID_PREFIX_MIN: usize = 4;
 
+/// Hint appended to an ambiguous-selector error. Servers a consumer knows do
+/// not appear in `peer list`, and only mDNS-visible devices appear in `scan`,
+/// so point at the two commands that actually print device IDs.
+pub(crate) const DISAMBIGUATE_HINT: &str =
+    "use the full device ID shown by `lanfp remote` / `lanfp peer list` to disambiguate";
+
 pub struct RuleListener {
     pub cancel: CancellationToken,
     pub task: tokio::task::JoinHandle<()>,
@@ -90,7 +96,9 @@ impl Daemon {
         let device = match db.get_device()? {
             Some(existing) => {
                 if existing.ed25519_pub != pubkey {
-                    tracing::warn!("identity key changed; peers must re-pair to trust this device");
+                    tracing::warn!(
+                        "identity key changed; peers must be granted again to trust this device"
+                    );
                 }
                 DeviceRecord {
                     id: existing.id,
@@ -575,7 +583,7 @@ impl Daemon {
             }
             if peers.is_empty() {
                 let message = if offline.is_empty() {
-                    "no servers known; run `lanfp scan` and ask the exposing device to run `lanfp peer grant` for this device".to_string()
+                    "no server has authorized this device yet; ask the exposing device to run `lanfp peer grant`, or connect to one directly with `lanfp remote <ip>`".to_string()
                 } else {
                     let shown: Vec<String> = offline_peers
                         .iter()
@@ -746,7 +754,8 @@ impl Daemon {
             };
             message.push_str(&format!("\n  {id}  {}  {state}", self.display_peer(peer)));
         }
-        message.push_str("\nuse the device ID (`lanfp scan` / `lanfp peer list`) to disambiguate");
+        message.push('\n');
+        message.push_str(DISAMBIGUATE_HINT);
         ipc_err(ExitCode::Usage, message)
     }
 
@@ -956,6 +965,7 @@ impl Daemon {
             id: peer.device_id,
             address: addr,
             online,
+            retrying: peer.may_dial,
         })
         .map_err(internal)
     }
@@ -1141,7 +1151,8 @@ pub fn ipc_err(code: ExitCode, message: impl Into<String>) -> IpcError {
 }
 
 pub fn internal(err: impl std::fmt::Display) -> IpcError {
-    IpcError::new(ExitCode::DaemonUnavailable, err.to_string())
+    // `#` keeps anyhow context chains; plain values render unchanged.
+    IpcError::new(ExitCode::DaemonUnavailable, format!("{err:#}"))
 }
 
 pub fn acquire_lock(paths: &Paths) -> Result<Option<std::fs::File>> {

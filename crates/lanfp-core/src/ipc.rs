@@ -332,6 +332,11 @@ pub struct PeerSetAddressResult {
     /// New `ip:port` used for future dials.
     pub address: String,
     pub online: bool,
+    /// Whether this device dials the peer in the background. False for a
+    /// device this machine only authorized (`may_connect`), which never
+    /// dials back.
+    #[serde(default)]
+    pub retrying: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -91,7 +91,7 @@ async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
     let paths = paths()?;
     let timeout_ms = match args.timeout.as_deref() {
         Some(raw) => parse_duration(raw)
-            .map_err(|e| CliError::new(ExitCode::Usage, e.to_string()))?
+            .map_err(|e| CliError::new(ExitCode::Usage, format!("{e:#}")))?
             .as_millis() as u64,
         None => 0,
     };
@@ -174,7 +174,10 @@ async fn peer_grant(args: crate::cli::PeerGrantArgs) -> Result<(), CliError> {
                 println!("granted {} [{}]", peer.peer, short_id(peer.id));
             }
             println!("key fingerprint: {}", peer.fingerprint);
-            println!("this device may now connect and forward exposed ports on this machine");
+            println!(
+                "{} may now connect and forward exposed ports on this machine",
+                peer.peer
+            );
         }
         for failure in &result.failed {
             eprintln!("failed to grant {}: {}", failure.peer, failure.message);
@@ -313,16 +316,23 @@ async fn peer_set_address(args: crate::cli::PeerSetAddressArgs) -> Result<(), Cl
     if args.json {
         return print_json(&result).map_err(CliError::internal);
     }
-    if result.online {
-        println!("updated {} [{}] (online)", result.peer, short_id(result.id));
-    } else {
-        println!(
-            "updated {} [{}] (offline; retrying in the background)",
-            result.peer,
-            short_id(result.id)
-        );
-    }
+    println!("{}", set_address_line(&result));
     Ok(())
+}
+
+/// Render `peer set-address` for the three states a device can be in: online,
+/// offline but dialed in the background, and offline and not dialed at all
+/// (an authorized device this machine never dials).
+fn set_address_line(result: &PeerSetAddressResult) -> String {
+    let id = short_id(result.id);
+    let peer = &result.peer;
+    if result.online {
+        format!("updated {peer} [{id}] (online)")
+    } else if result.retrying {
+        format!("updated {peer} [{id}] (offline; dialing in the background)")
+    } else {
+        format!("updated {peer} [{id}] (offline; this device does not dial it)")
+    }
 }
 
 async fn local(args: crate::cli::JsonArgs) -> Result<(), CliError> {
@@ -360,8 +370,10 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
     )
     .await?;
     let result: RemoteResult = decode(response.data)?;
-    if let Some(note) = offline_notice(&result) {
-        eprintln!("{note}");
+    if !args.json {
+        if let Some(note) = offline_notice(&result) {
+            eprintln!("{note}");
+        }
     }
     if args.json {
         return print_json(&result).map_err(CliError::internal);
@@ -482,11 +494,14 @@ async fn forward_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
                 f.target.to_string(),
                 f.state.as_str().to_string(),
                 relative_time(f.since),
+                f.error.clone().unwrap_or_else(|| "-".into()),
             ]
         })
         .collect();
     print_table(
-        &["LOCAL", "PEER ID", "PEER", "TARGET", "STATE", "SINCE"],
+        &[
+            "LOCAL", "PEER ID", "PEER", "TARGET", "STATE", "SINCE", "ERROR",
+        ],
         &rows,
     );
     Ok(())
@@ -675,5 +690,32 @@ mod tests {
     #[test]
     fn uninstall_with_an_entry_succeeds() {
         uninstall_result(Some("unit".into())).expect("removing an entry succeeds");
+    }
+
+    fn set_address_result(online: bool, retrying: bool) -> PeerSetAddressResult {
+        PeerSetAddressResult {
+            schema: 2,
+            peer: "mac-mini@192.168.8.11".into(),
+            id: uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap(),
+            address: "192.168.8.11:47811".into(),
+            online,
+            retrying,
+        }
+    }
+
+    #[test]
+    fn set_address_reports_whether_this_device_dials() {
+        assert_eq!(
+            set_address_line(&set_address_result(true, true)),
+            "updated mac-mini@192.168.8.11 [11111111] (online)"
+        );
+        assert_eq!(
+            set_address_line(&set_address_result(false, true)),
+            "updated mac-mini@192.168.8.11 [11111111] (offline; dialing in the background)"
+        );
+        assert_eq!(
+            set_address_line(&set_address_result(false, false)),
+            "updated mac-mini@192.168.8.11 [11111111] (offline; this device does not dial it)"
+        );
     }
 }

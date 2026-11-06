@@ -46,7 +46,7 @@ PEER ID    PEER                    PORT    VERSION   STATE
 $ lanfp peer grant mac-mini@192.168.8.11
 granted mac-mini@192.168.8.11 [5e6f7a8b]
 key fingerprint: 1a2b...
-this device may now connect and forward exposed ports on this machine
+mac-mini@192.168.8.11 may now connect and forward exposed ports on this machine
 ```
 
 **2. Optionally restrict what it can reach.** Without a whitelist every listening port is exposed. Add one in `config.toml`:

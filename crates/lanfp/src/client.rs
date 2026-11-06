@@ -23,7 +23,8 @@ impl CliError {
     }
 
     pub fn internal(err: impl std::fmt::Display) -> Self {
-        Self::new(ExitCode::DaemonUnavailable, err.to_string())
+        // `#` keeps anyhow context chains; plain values render unchanged.
+        Self::new(ExitCode::DaemonUnavailable, format!("{err:#}"))
     }
 }
 
@@ -210,4 +211,18 @@ pub fn spawn_daemon(paths: &Paths) -> Result<(), CliError> {
         )
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_keeps_the_context_chain() {
+        let err = anyhow::anyhow!("expected `]`").context("parse config /tmp/config.toml");
+        let err = CliError::internal(err);
+        assert_eq!(err.code, ExitCode::DaemonUnavailable);
+        assert!(err.message.contains("parse config"), "{}", err.message);
+        assert!(err.message.contains("expected `]`"), "{}", err.message);
+    }
 }

@@ -6,7 +6,7 @@
 //! C's record is not a reciprocal authorization: it is only a pinned server
 //! identity.
 
-use crate::daemon::{internal, ipc_err, Daemon};
+use crate::daemon::{internal, ipc_err, Daemon, DISAMBIGUATE_HINT};
 use crate::db::PeerRecord;
 use crate::discovery::DiscoveredPeer;
 use crate::session::SessionHandle;
@@ -83,7 +83,8 @@ impl Daemon {
                     .unwrap_or_else(|| id.to_string());
                 message.push_str(&format!("\n  {}  {}", lanfp_core::short_id(*id), display));
             }
-            message.push_str("\nuse the device ID (`lanfp scan`) to disambiguate");
+            message.push('\n');
+            message.push_str(DISAMBIGUATE_HINT);
             return Err(ipc_err(ExitCode::Usage, message));
         }
         if ids.len() == 1 {
@@ -99,7 +100,7 @@ impl Daemon {
                     return Err(ipc_err(
                         ExitCode::AuthorizationFailed,
                         format!(
-                            "{} speaks protocol v{}; upgrade both devices to v{PROTOCOL_VERSION}",
+                            "{}: protocol version mismatch: peer speaks v{}, this build speaks v{PROTOCOL_VERSION}; upgrade both devices",
                             peer.display(),
                             peer.version
                         ),
@@ -124,8 +125,8 @@ impl Daemon {
                 ),
             )),
             Err(err) => Err(ipc_err(
-                ExitCode::DeviceNotFound,
-                format!("cannot resolve peer `{s}`: {err}"),
+                ExitCode::Usage,
+                format!("invalid peer selector `{s}`: {err}"),
             )),
         }
     }
@@ -453,7 +454,7 @@ impl Daemon {
                     reject(
                         &mut stream,
                         &format!(
-                            "protocol version mismatch: peer speaks v{version}, this build speaks v{PROTOCOL_VERSION}"
+                            "protocol version mismatch: peer speaks v{version}, this build speaks v{PROTOCOL_VERSION}; upgrade both devices"
                         ),
                         ExitCode::AuthorizationFailed,
                     )
@@ -574,11 +575,13 @@ impl Daemon {
         let existing = self.db.get_peer(peer_uuid)?;
         if let Some(old) = existing.as_ref() {
             if old.ed25519_pub != peer_pubkey && old.may_connect {
+                // The initiator reads this text, so name the other side
+                // explicitly: the responder cannot pass `--force` here.
                 reject(
                     &mut stream,
                     &format!(
-                        "{} has a new public key; run `lanfp peer grant --force` on this device",
-                        old.name
+                        "grant refused: the other device still trusts an old key for {}; run `lanfp peer revoke {}` there, then retry this grant",
+                        old.name, old.name
                     ),
                     ExitCode::AuthorizationFailed,
                 )
@@ -659,7 +662,7 @@ impl Daemon {
                         &mut stream,
                         &IdentityMessage::Reject {
                             reason: format!(
-                                "protocol version mismatch: peer speaks v{version}, this build speaks v{PROTOCOL_VERSION}"
+                                "protocol version mismatch: peer speaks v{version}, this build speaks v{PROTOCOL_VERSION}; upgrade both devices"
                             ),
                             code: ExitCode::AuthorizationFailed.code(),
                         },
@@ -848,6 +851,7 @@ impl Daemon {
         peer: &PeerRecord,
     ) -> Result<Arc<SessionHandle>, IpcError> {
         let mut dial_error = None;
+        let mut saw_session = false;
         if self.sessions.get(peer.device_id).is_none() {
             if let Err(err) = self.dial_peer(peer).await {
                 dial_error = Some(err);
@@ -856,22 +860,31 @@ impl Daemon {
         let deadline = Instant::now() + SESSION_WAIT;
         loop {
             if let Some(handle) = self.sessions.get(peer.device_id) {
+                saw_session = true;
                 if handle.inventory_received() && handle.exposure_received() {
                     return Ok(handle);
                 }
             }
             if Instant::now() >= deadline {
-                let detail = dial_error
-                    .map(|err| format!(": {err:#}"))
-                    .unwrap_or_default();
-                return Err(ipc_err(
-                    ExitCode::NotAuthorizedOrOffline,
+                let display = self.display_peer(peer);
+                let id = lanfp_core::short_id(peer.device_id);
+                // A session that is up but silent is a different problem from
+                // an unreachable peer; do not report the first as the second.
+                let message = if saw_session {
                     format!(
-                        "cannot establish a session with {} [{}]{detail}; the peer may not have granted this device (run `lanfp peer grant` on the exposing device)",
-                        self.display_peer(peer),
-                        lanfp_core::short_id(peer.device_id)
-                    ),
-                ));
+                        "session with {display} [{id}] is up but no port inventory arrived within {}s; retry, or check `lanfp daemon status` on that device",
+                        SESSION_WAIT.as_secs()
+                    )
+                } else {
+                    let detail = dial_error
+                        .as_ref()
+                        .map(|err| format!(": {err:#}"))
+                        .unwrap_or_default();
+                    format!(
+                        "cannot reach {display} [{id}]{detail}; if it is reachable, the exposing device must run `lanfp peer grant` for this device"
+                    )
+                };
+                return Err(ipc_err(ExitCode::NotAuthorizedOrOffline, message));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

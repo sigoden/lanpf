@@ -347,11 +347,13 @@ impl Daemon {
             bail!("session identity mismatch: TLS peer {peer_id}, hello {peer_uuid}");
         }
         if peer_version != PROTOCOL_VERSION {
-            bail!("peer speaks protocol v{peer_version}, this build speaks v{PROTOCOL_VERSION}");
+            bail!(
+                "protocol version mismatch: peer speaks v{peer_version}, this build speaks v{PROTOCOL_VERSION}; upgrade both devices"
+            );
         }
 
         // The remote hostname is part of the peer's authenticated hello; keep
-        // the stored display name current without waiting for a re-pair.
+        // the stored display name current without waiting for a new grant.
         let peer_name = lanfp_core::sanitize_device_name(&peer_name);
         if peer_name != peer.name {
             match self.db.update_peer_name(peer.device_id, &peer_name) {

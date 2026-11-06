@@ -31,7 +31,7 @@ The machine that exposes a service is the **host**; the machine that uses it is 
    $ lanfp peer grant mac-mini@192.168.8.11
    granted mac-mini@192.168.8.11 [5e6f7a8b]
    key fingerprint: 1a2b...
-   this device may now connect and forward exposed ports on this machine
+   mac-mini@192.168.8.11 may now connect and forward exposed ports on this machine
    ```
 
 2. The consumer can now run `lanfp remote` to see every host that authorized it and that host's exposure view.
@@ -83,7 +83,7 @@ $ lanfp forward add nix 5000 --listen 0
 created 52714 -> nix@192.168.8.10:5000 (active)
 ```
 
-The target must be in the peer's exposure view. The listen port is the rule ID: it appears in `forward list` and the `FORWARDED` column of `remote`, and is the argument to `forward remove`. It is stored with the rule, so a restart rebinds the same port.
+The target must be in the peer's exposure view. The listen port is the rule ID: it appears in `forward list` and the `FORWARDED` column of `remote`, and is the argument to `forward remove`. It is stored with the rule, so a restart rebinds the same port. When a rule is not `active`, the `ERROR` column of `forward list` (and the `error` field of `--json`) carries the reason, for example a target that stopped listening or a listener that could not be restored.
 
 ## JSON output
 

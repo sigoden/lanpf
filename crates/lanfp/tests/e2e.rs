@@ -464,6 +464,17 @@ async fn cli_reports_documented_exit_codes() {
     assert_eq!(a.cli(&["peer", "add"]).status.code(), Some(2));
     assert_eq!(a.cli(&["peer", "wait"]).status.code(), Some(2));
 
+    // No known server: the hint must name the two commands that can change
+    // that state, not a read-only scan that cannot create a server record.
+    let empty = a.cli(&["remote"]);
+    assert_eq!(empty.status.code(), Some(4), "{empty:?}");
+    let stderr = String::from_utf8_lossy(&empty.stderr);
+    assert!(stderr.contains("lanfp remote <ip>"), "{stderr}");
+    assert!(!stderr.contains("`lanfp scan`"), "{stderr}");
+
+    // A malformed selector is a usage error, not "device not found".
+    assert_eq!(a.cli(&["remote", ""]).status.code(), Some(2));
+
     // A consumer that has not been granted access is rejected.
     let not_granted = a
         .call_err(Command::Remote {
@@ -801,6 +812,21 @@ async fn grant_is_one_way() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_grant_names_the_granted_device() {
+    let consumer = Node::start().await;
+    let host = Node::start().await;
+    let output = host.cli(&["peer", "grant", &format!("127.0.0.1:{}", consumer.port)]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("may now connect and forward exposed ports on this machine"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("this device may now connect"), "{stdout}");
+    consumer.wait_online(1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expose_whitelist_from_config_and_non_listening() {
     // Ports must exist before the daemon boots: the whitelist is config-owned.
     let p1 = start_echo_server();
@@ -847,6 +873,13 @@ async fn expose_whitelist_from_config_and_non_listening() {
         })
         .await;
     assert_eq!(added.state, RuleState::TargetGone);
+
+    // The text table must show why the rule is not active.
+    let listed = a.cli(&["forward", "list"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("target_gone"), "{stdout}");
+    assert!(stdout.contains("ERROR"), "{stdout}");
+    assert!(stdout.contains("listening on the peer"), "{stdout}");
 
     // A listening but unexposed port is rejected.
     let err = a
