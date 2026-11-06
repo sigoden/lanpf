@@ -123,12 +123,14 @@ if [ -z "${target-}" ]; then
   uname_target="$(uname -m)-$kernel"
 
   case $uname_target in
-    aarch64-Linux)     target=aarch64-unknown-linux-musl;;
-    arm64-Darwin)      target=aarch64-apple-darwin;;
-    x86_64-Darwin)     target=x86_64-apple-darwin;;
-    x86_64-Linux)      target=x86_64-unknown-linux-musl;;
-    x86_64-Windows_NT) target=x86_64-pc-windows-msvc;;
-    x86_64-MINGW64_NT) target=x86_64-pc-windows-msvc;;
+    aarch64-Linux)      target=aarch64-unknown-linux-musl;;
+    arm64-Darwin)       target=aarch64-apple-darwin;;
+    x86_64-Darwin)      target=x86_64-apple-darwin;;
+    x86_64-Linux)       target=x86_64-unknown-linux-musl;;
+    x86_64-Windows_NT)  target=x86_64-pc-windows-msvc;;
+    x86_64-MINGW64_NT)  target=x86_64-pc-windows-msvc;;
+    aarch64-Windows_NT) target=aarch64-pc-windows-msvc;;
+    aarch64-MINGW64_NT) target=aarch64-pc-windows-msvc;;
     *)
       err "Could not determine target from uname -m/uname -s; use --target: $uname_target"
     ;;
@@ -137,8 +139,8 @@ fi
 
 # windows archives are zips, not tarballs
 case $target in
-    x86_64-pc-windows-msvc) extension=zip; need unzip;;
-    *)                      extension=tar.gz;;
+    *-pc-windows-msvc) extension=zip; need unzip;;
+    *)                 extension=tar.gz;;
 esac
 
 archive="$releases/download/$tag/$crate-$tag-$target.$extension"
