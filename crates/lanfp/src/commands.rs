@@ -103,7 +103,8 @@ async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
     if result.peers.is_empty() {
         println!("no devices discovered");
         eprintln!(
-            "hint: start `lanfp serve` on the other device, or use `lanfp peer grant <ip>[:port]`"
+            "hint: start the daemon on the other device (`lanfp daemon start` or `lanfp serve`), \
+             or use `lanfp peer grant <ip>[:port]`"
         );
         return Ok(());
     }

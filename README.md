@@ -14,7 +14,7 @@
 - **Instant revocation.** `lanfp peer revoke` removes the key from the allow-list and drops the live session.
 - **Identity survives network changes.** A stable UUID and pinned key follow a device across IP changes, with `peer set-address` when mDNS cannot be used.
 - **One binary, no root.** Linux, macOS and Windows; runs as your user with no system service, and login autostart is optional.
-- **Scriptable and self-starting.** `--json` with `schema: 2` plus stable exit codes; data commands auto-start the daemon.
+- **Scriptable and self-starting.** `--json` with `schema: 2` plus stable exit codes; data commands auto-start the local daemon.
 
 ## Install
 
@@ -36,7 +36,18 @@ cargo install --path crates/lanfp --locked
 
 `nix` runs a web app on port 3000; open it from `mac-mini`.
 
-**1. On `nix`, find the device and authorize it.**
+**1. Start the daemon on both machines.**
+
+Devices are advertised and reached through the daemon, so it must already be running on the other machine before you scan or grant:
+
+```sh
+lanfp daemon start    # background, run on both nix and mac-mini
+# lanfp serve         # foreground alternative, logs on stderr
+```
+
+`lanfp daemon install` registers the daemon at login. Data commands auto-start it only on the machine you run them on, so starting `lanfp scan` on `nix` does not start anything on `mac-mini`; a device whose daemon is not running cannot be discovered or granted.
+
+**2. On `nix`, find the device and authorize it.**
 
 ```sh
 $ lanfp scan
@@ -49,7 +60,9 @@ key fingerprint: 1a2b...
 mac-mini@192.168.8.11 may now connect and forward exposed ports on this machine
 ```
 
-**2. Optionally restrict what it can reach.** Without a whitelist every listening port is exposed. Add one in `config.toml`:
+If `mac-mini` is not listed, check that its daemon is running (`lanfp daemon status` on that machine) and that mDNS is not blocked; see [If mDNS discovery fails](#if-mdns-discovery-fails). `peer grant` also needs the other machine's daemon, because the grant handshake runs against its agent port.
+
+**3. Optionally restrict what it can reach.** Without a whitelist every listening port is exposed. Add one in `config.toml`:
 
 ```toml
 [agent]
@@ -58,7 +71,7 @@ expose_ports = ["3000", "3001", "8000-8100"]
 
 The daemon picks up the whitelist within about 5 seconds. A whitelisted port may be listed before its service listens.
 
-**3. On `mac-mini`, see the exposed ports and forward one.**
+**4. On `mac-mini`, see the exposed ports and forward one.**
 
 ```sh
 $ lanfp remote
@@ -72,12 +85,6 @@ $ curl http://127.0.0.1:3000
 ```
 
 If 3000 is taken locally, `--listen 0` picks a free loopback port. Remove the forward with `lanfp forward remove 3000`.
-
-**4. Start the daemon at login (optional).**
-
-```sh
-lanfp daemon install
-```
 
 ### If mDNS discovery fails
 

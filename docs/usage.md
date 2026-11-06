@@ -23,7 +23,7 @@
 
 ## Authorization (one-way)
 
-The machine that exposes a service is the **host**; the machine that uses it is the **consumer**.
+The machine that exposes a service is the **host**; the machine that uses it is the **consumer**. Both machines must be running the daemon (`lanfp daemon start`, `lanfp serve`, or login autostart): discovery and the grant handshake talk to the other machine's daemon, and data commands auto-start the daemon only on the machine where you run them.
 
 1. On the host, `lanfp scan` lists devices running `lanfp serve`; authorize one with `lanfp peer grant` (pick from the scan) or pass selectors:
 

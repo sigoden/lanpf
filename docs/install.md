@@ -40,7 +40,7 @@ cargo install --path crates/lanfp --locked
 
 ## First run and autostart
 
-Data commands auto-start the daemon; `lanfp daemon start` and `lanfp daemon status` manage it explicitly. `lanfp serve` runs it in the foreground with logs on stderr.
+Data commands auto-start the daemon on the local machine; `lanfp daemon start` and `lanfp daemon status` manage it explicitly. The other machine must already be running its own daemon for `scan` and `peer grant` to reach it. `lanfp serve` runs it in the foreground with logs on stderr.
 
 Login autostart is optional: `lanfp daemon install` registers it and `lanfp daemon uninstall` removes it.
 
