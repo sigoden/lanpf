@@ -1,18 +1,89 @@
 # Installation and Operations
 
-## Build
+`lanfp` is distributed as a single portable binary. There is no installer, package manager
+package or system service to set up.
+
+## Pre-built binaries (recommended)
+
+Download the archive for your platform from
+[GitHub Releases](https://github.com/sigoden/lanfp/releases/latest), unpack it, and place the
+`lanfp` binary (`lanfp.exe` on Windows) in a directory on your `PATH`.
+
+| Platform | Archive |
+| --- | --- |
+| Linux x86_64 | `lanfp-v*-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `lanfp-v*-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Intel | `lanfp-v*-x86_64-apple-darwin.tar.gz` |
+| macOS Apple silicon | `lanfp-v*-aarch64-apple-darwin.tar.gz` |
+| Windows x64 | `lanfp-v*-x86_64-pc-windows-msvc.zip` |
+
+Verify the download:
+
+```sh
+lanfp --version
+```
+
+### Unix installer
+
+`install.sh` detects the platform, downloads the latest release and installs the binary:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sigoden/lanfp/main/install.sh \
+  | sh -s -- --to "$HOME/.local/bin"
+```
+
+Options:
+
+| Option | Description |
+| --- | --- |
+| `--to DIR` | Install into `DIR` (default: `/usr/local/bin`) |
+| `--tag TAG` | Install a specific release tag instead of the latest |
+| `--target TARGET` | Override platform detection, e.g. `x86_64-unknown-linux-musl` |
+| `--force`, `-f` | Overwrite an existing binary |
+
+The installer is intended for Linux and macOS. It needs `curl`, `tar` and `install`. Installing
+to `/usr/local/bin` usually requires root. The `--to "$HOME/.local/bin"` form avoids that, but the
+directory must be in your `PATH`.
+
+### Windows
+
+Download the `.zip` from Releases, extract `lanfp.exe`, and add its directory to `PATH`. A
+PowerShell equivalent:
+
+```powershell
+$tag = (Invoke-RestMethod https://api.github.com/repos/sigoden/lanfp/releases/latest).tag_name
+$zip = "lanfp-$tag-x86_64-pc-windows-msvc.zip"
+Invoke-WebRequest "https://github.com/sigoden/lanfp/releases/download/$tag/$zip" -OutFile $zip
+Expand-Archive $zip -DestinationPath "$env:LOCALAPPDATA\Programs\lanfp" -Force
+```
+
+Then add `%LOCALAPPDATA%\Programs\lanfp` to your `PATH`.
+
+## Build from source
+
+Requires Rust 1.84 or newer.
 
 ```sh
 cargo build --release -p lanfp
-install -m 0755 target/release/lanfp ~/.local/bin/lanfp   # Linux/macOS
+# artifact: target/release/lanfp (target\release\lanfp.exe on Windows)
 ```
 
-On Windows, just copy `target\release\lanfp.exe`. The current release is a portable binary; no
-installer is provided.
+Install it into Cargo's binary directory:
 
-## First Run
+```sh
+cargo install --path crates/lanfp --locked
+```
 
-Any data command spawns the background instance automatically when needed:
+Run the tests:
+
+```sh
+cargo test --workspace
+```
+
+## First run
+
+Any data command spawns the background instance automatically when needed. To start it
+explicitly:
 
 ```sh
 lanfp daemon start
@@ -21,7 +92,7 @@ lanfp daemon status
 
 `lanfp serve` is the foreground debugging mode; logs go straight to stderr.
 
-## Login Autostart (Optional)
+## Login autostart (optional)
 
 ```sh
 lanfp daemon install
@@ -50,14 +121,14 @@ service in that session; the plist is still installed and starts at the next GUI
   require the "Local Network" permission.
 - Windows: Windows Firewall prompts on first listen; choose to allow private networks.
 
-## Ports and Addresses
+## Ports and addresses
 
 - The agent port is configured as `[agent] listen` in `config.toml`, default `0.0.0.0:47811`.
 - After changing the agent port, restart the background instance:
   `lanfp daemon stop && lanfp daemon start`.
 - Forwarding listeners bind `127.0.0.1` only, so no firewall opening is needed.
 
-## Logs and Troubleshooting
+## Logs and troubleshooting
 
 ```sh
 lanfp daemon status          # PID, uptime, agent address, IPC, log path
@@ -77,7 +148,7 @@ Common issues:
 | `forward add` exits with 7 | Port `<1024` without root; use a high port |
 | Port owner shows `-` | The current user cannot see that process; the port itself still works |
 
-## Upgrading and Reinstalling a Device
+## Upgrading and reinstalling a device
 
 - Upgrading the binary does not change the identity keys (`identity.key` is persisted).
 - Deleting the data directory or reinstalling the OS generates new keys; the peer must then

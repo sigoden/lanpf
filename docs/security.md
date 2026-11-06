@@ -78,8 +78,8 @@ A 6-digit decimal code has only 1,000,000 possibilities, therefore:
 ## Local IPC
 
 - Linux/macOS: Unix domain socket, file mode 0600, inside a runtime directory with mode 0700.
-- Windows: named pipe `\\.\pipe\lanfp-<username>` using the process default DACL (usually allowing
-  only the current user and administrators).
+- Windows: named pipe `\\.\pipe\lanfp-<username>-<hash>` using the process default DACL (usually
+  allowing only the current user and administrators).
 - Frame format: `u32 BE length + JSON`, maximum 16 MiB.
 
 ## Listener Exposure
