@@ -1,4 +1,4 @@
-//! Pairing: `lanfp pair wait` on the responder side and `lanfp pair` on the
+//! Pairing: `lanfp peer wait` on the responder side and `lanfp peer add` on the
 //! initiator side.
 //!
 //! Security model: the 6-digit code is the SPAKE2 password. The responder
@@ -105,7 +105,7 @@ struct PendingPair {
 
 impl Daemon {
     // ------------------------------------------------------------------
-    // `lanfp pair wait`
+    // `lanfp peer wait`
     // ------------------------------------------------------------------
 
     pub async fn pair_wait_start_json(
@@ -124,7 +124,7 @@ impl Daemon {
             if !existing.expired() && !existing.finished() {
                 return Err(ipc_err(
                     ExitCode::PeerNotWaiting,
-                    "another `lanfp pair wait` session is already active",
+                    "another `lanfp peer wait` session is already active",
                 ));
             }
         }
@@ -266,7 +266,7 @@ impl Daemon {
         let Some((code, token, status, max_attempts, exchange_timeout)) = session else {
             reject(
                 &mut stream,
-                "no pairing request is waiting; run `lanfp pair wait` on the peer device",
+                "no pairing request is waiting; run `lanfp peer wait` on the peer device",
                 ExitCode::PeerNotWaiting.code(),
             )
             .await;
@@ -444,7 +444,7 @@ impl Daemon {
     }
 
     // ------------------------------------------------------------------
-    // Initiator side (`lanfp pair <peer>`)
+    // Initiator side (`lanfp peer add <peer>`)
     // ------------------------------------------------------------------
 
     pub async fn pair_start_json(
@@ -460,7 +460,7 @@ impl Daemon {
                         ipc_err(
                             ExitCode::DeviceNotFound,
                             format!(
-                                "{} has no known address; use `lanfp pair <ip>`",
+                                "{} has no known address; use `lanfp peer add <ip>`",
                                 self.display_peer(peer)
                             ),
                         )
@@ -489,7 +489,7 @@ impl Daemon {
                     ipc_err(
                         ExitCode::PeerNotWaiting,
                         format!(
-                    "timed out connecting to {connect_addr}; is `lanfp pair wait` running there?"
+                    "timed out connecting to {connect_addr}; is `lanfp peer wait` running there?"
                 ),
                     )
                 })?
@@ -497,7 +497,7 @@ impl Daemon {
                     ipc_err(
                         ExitCode::PeerNotWaiting,
                         format!(
-                    "cannot connect to {connect_addr}: {err}; is `lanfp pair wait` running there?"
+                    "cannot connect to {connect_addr}: {err}; is `lanfp peer wait` running there?"
                 ),
                     )
                 })?;
@@ -525,7 +525,7 @@ impl Daemon {
             .map_err(|_| {
                 ipc_err(
                     ExitCode::PeerNotWaiting,
-                    "no pairing response; run `lanfp pair wait` on the other device",
+                    "no pairing response; run `lanfp peer wait` on the other device",
                 )
             })?
             .map_err(|e| {
@@ -567,7 +567,7 @@ impl Daemon {
                 return Err(ipc_err(
                     ExitCode::PairingFailed,
                     format!(
-                        "device identity changed at {connect_addr}; if the device was reinstalled, use `lanfp pair --force`"
+                        "device identity changed at {connect_addr}; if the device was reinstalled, use `lanfp peer add --force`"
                     ),
                 ));
             }
@@ -615,14 +615,14 @@ impl Daemon {
         let Some(mut pair) = pending.remove(&token) else {
             return Err(ipc_err(
                 ExitCode::PairingFailed,
-                "pairing session not found or expired; run `lanfp pair` again",
+                "pairing session not found or expired; run `lanfp peer add` again",
             ));
         };
         drop(pending);
         if pair.expires <= Instant::now() {
             return Err(ipc_err(
                 ExitCode::PairingFailed,
-                "pairing session expired; run `lanfp pair` again",
+                "pairing session expired; run `lanfp peer add` again",
             ));
         }
 

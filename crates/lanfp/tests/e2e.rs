@@ -18,6 +18,13 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lanfp"))
 }
 
+fn run_cli(args: &[&str]) -> std::process::Output {
+    StdCommand::new(bin())
+        .args(args)
+        .output()
+        .expect("run lanfp cli")
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -427,9 +434,15 @@ async fn cli_reports_documented_exit_codes() {
     let a = Node::start().await;
     let b = Node::start().await;
 
-    // Pairing without `pair wait` fails with code 6.
+    // Pairing without `peer wait` fails with code 6.
     let started = Instant::now();
-    let output = a.cli(&["pair", &format!("127.0.0.1:{}", b.port), "--code", "123456"]);
+    let output = a.cli(&[
+        "peer",
+        "add",
+        &format!("127.0.0.1:{}", b.port),
+        "--code",
+        "123456",
+    ]);
     assert_eq!(output.status.code(), Some(6), "{output:?}");
     assert!(started.elapsed() < Duration::from_secs(5));
 
@@ -724,4 +737,51 @@ async fn duplicate_names_are_ambiguous() {
         })
         .await;
     assert_eq!(remote.peers[0].id, chosen.id);
+}
+
+#[test]
+fn cli_surface_is_noun_grouped() {
+    let help = run_cli(&["--help"]);
+    assert!(help.status.success(), "{help:?}");
+    let text = String::from_utf8_lossy(&help.stdout);
+    for group in ["peer", "forward", "daemon"] {
+        assert!(text.contains(&format!("\n  {group} ")), "{text}");
+    }
+    assert!(!text.contains("\n  pair "), "{text}");
+
+    let peer = run_cli(&["peer", "--help"]);
+    assert!(peer.status.success(), "{peer:?}");
+    let text = String::from_utf8_lossy(&peer.stdout);
+    for sub in ["add", "wait", "list", "set-address"] {
+        assert!(text.contains(sub), "{text}");
+    }
+
+    let add = run_cli(&["peer", "add", "--help"]);
+    assert!(add.status.success(), "{add:?}");
+    let text = String::from_utf8_lossy(&add.stdout);
+    for option in ["<PEER>", "--code", "--force", "--json"] {
+        assert!(text.contains(option), "{text}");
+    }
+
+    let wait = run_cli(&["peer", "wait", "--help"]);
+    assert!(wait.status.success(), "{wait:?}");
+    assert!(
+        String::from_utf8_lossy(&wait.stdout).contains("--timeout"),
+        "{wait:?}"
+    );
+
+    // The old spelling and a missing selector are usage errors.
+    assert_eq!(run_cli(&["pair", "127.0.0.1:1"]).status.code(), Some(2));
+    assert_eq!(run_cli(&["peer", "add"]).status.code(), Some(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_wait_times_out() {
+    let a = Node::start().await;
+    let output = a.cli(&["peer", "wait", "--timeout", "1s"]);
+    assert_eq!(output.status.code(), Some(9), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("waiting for pairing request"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("timed out"), "{stderr}");
 }

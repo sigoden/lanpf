@@ -51,8 +51,9 @@ fn offline_notice(result: &RemoteResult) -> Option<String> {
 pub async fn dispatch(command: Commands) -> Result<(), CliError> {
     match command {
         Commands::Scan(args) => scan(args).await,
-        Commands::Pair(args) => pair(args).await,
         Commands::Peer(cmd) => match cmd {
+            PeerCmd::Add(args) => peer_add(args).await,
+            PeerCmd::Wait(args) => peer_wait(args).await,
             PeerCmd::List(args) => peer_list(args).await,
             PeerCmd::SetAddress(args) => peer_set_address(args).await,
         },
@@ -90,7 +91,7 @@ async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
     }
     if result.peers.is_empty() {
         println!("no devices discovered");
-        eprintln!("hint: if mDNS is blocked, pair manually with `lanfp pair <ip>[:port]`");
+        eprintln!("hint: if mDNS is blocked, pair manually with `lanfp peer add <ip>[:port]`");
         return Ok(());
     }
     let ids: Vec<_> = result.peers.iter().map(|p| p.id).collect();
@@ -368,18 +369,8 @@ async fn inbound(args: crate::cli::JsonArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn pair(args: crate::cli::PairArgs) -> Result<(), CliError> {
-    match args.peer.clone() {
-        None => Err(CliError::new(
-            ExitCode::Usage,
-            "usage: lanfp pair <peer> | lanfp pair wait",
-        )),
-        Some(selector) if selector == "wait" => pair_wait(args).await,
-        Some(selector) => pair_initiate(args, selector).await,
-    }
-}
-
-async fn pair_initiate(args: crate::cli::PairArgs, selector: String) -> Result<(), CliError> {
+async fn peer_add(args: crate::cli::PeerAddArgs) -> Result<(), CliError> {
+    let selector = args.peer.clone();
     let paths = paths()?;
     if !args.json {
         println!("connecting to {selector}...");
@@ -439,7 +430,7 @@ fn prompt_code(peer: &str) -> Result<String, CliError> {
     }
 }
 
-async fn pair_wait(args: crate::cli::PairArgs) -> Result<(), CliError> {
+async fn peer_wait(args: crate::cli::PeerWaitArgs) -> Result<(), CliError> {
     let paths = paths()?;
     let timeout_secs = match args.timeout.as_deref() {
         Some(raw) => parse_duration(raw)

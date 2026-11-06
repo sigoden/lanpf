@@ -61,7 +61,7 @@ Suppose `mac-mini` runs a web app on port 3000 and you want to open it from `nix
 **1. On `mac-mini`, wait for a pairing request.**
 
 ```sh
-$ lanfp pair wait
+$ lanfp peer wait
 waiting for pairing request (Ctrl-C to cancel)...
 ```
 
@@ -72,7 +72,7 @@ $ lanfp scan
 PEER ID   PEER                    PORT    STATE
 5e6f7a8b  mac-mini@192.168.8.10   47811   unpaired
 
-$ lanfp pair mac-mini
+$ lanfp peer add mac-mini
 connecting to mac-mini...
 pairing code (shown on mac-mini):
 ```
@@ -126,9 +126,9 @@ lanfp daemon install
 Some firewalls, VPNs and Wi-Fi access points block mDNS. Pair by address instead:
 
 ```sh
-lanfp pair 192.168.8.10
+lanfp peer add 192.168.8.10
 # or, when the agent port is not 47811:
-lanfp pair 192.168.8.10:5000
+lanfp peer add 192.168.8.10:5000
 ```
 
 If a device's address changes later, update it without pairing again:

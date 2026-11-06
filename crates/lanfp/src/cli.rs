@@ -22,9 +22,7 @@ pub struct Cli {
 pub enum Commands {
     /// Scan the LAN with mDNS and list discovered devices.
     Scan(ScanArgs),
-    /// Pair with a device, or wait for an incoming pairing request.
-    Pair(PairArgs),
-    /// Manage paired devices.
+    /// Pair with a device, or manage paired devices.
     #[command(subcommand)]
     Peer(PeerCmd),
     /// List this machine's Native listening ports.
@@ -67,25 +65,6 @@ pub struct ScanArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct PairArgs {
-    /// Peer selector (`<name>@<address>`, `<ip>[:port]`) or `wait`.
-    #[arg(value_name = "PEER")]
-    pub peer: Option<String>,
-    /// Pairing code shown on the waiting device (skips the prompt).
-    #[arg(long, value_name = "CODE")]
-    pub code: Option<String>,
-    /// Replace an existing trust entry when the device's key changed.
-    #[arg(long)]
-    pub force: bool,
-    /// Print JSON instead of text.
-    #[arg(long)]
-    pub json: bool,
-    /// Timeout for `pair wait` (e.g. 300s).
-    #[arg(long, value_name = "DURATION")]
-    pub timeout: Option<String>,
-}
-
-#[derive(Debug, Args)]
 pub struct RemoteArgs {
     /// Only list this peer.
     #[arg(value_name = "PEER")]
@@ -96,10 +75,37 @@ pub struct RemoteArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PeerCmd {
+    /// Pair with a device (start the 6-digit handshake).
+    Add(PeerAddArgs),
+    /// Wait for an incoming pairing request and show the 6-digit code.
+    Wait(PeerWaitArgs),
     /// List paired devices with their stable IDs.
     List(JsonArgs),
     /// Update the address used to reach a paired device.
     SetAddress(PeerSetAddressArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PeerAddArgs {
+    /// Peer selector (`<name>@<address>`, `<ip>[:port]`).
+    #[arg(value_name = "PEER")]
+    pub peer: String,
+    /// Pairing code shown on the waiting device (skips the prompt).
+    #[arg(long, value_name = "CODE")]
+    pub code: Option<String>,
+    /// Replace an existing trust entry when the device's key changed.
+    #[arg(long)]
+    pub force: bool,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PeerWaitArgs {
+    /// How long to wait for an incoming request (e.g. 300s).
+    #[arg(long, value_name = "DURATION")]
+    pub timeout: Option<String>,
 }
 
 #[derive(Debug, Args)]

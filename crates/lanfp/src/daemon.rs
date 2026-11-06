@@ -546,7 +546,7 @@ impl Daemon {
             }
             if peers.is_empty() {
                 let message = if offline.is_empty() {
-                    "no paired devices; use `lanfp pair <peer>` first".to_string()
+                    "no paired devices; use `lanfp peer add <peer>` first".to_string()
                 } else {
                     let shown: Vec<String> = offline_peers
                         .iter()

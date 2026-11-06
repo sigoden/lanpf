@@ -1,7 +1,7 @@
 //! mDNS discovery: advertise `_lanfp._tcp.local.` and maintain a cache of
 //! discovered devices.
 //!
-//! If mDNS is blocked by a firewall, manual `lanfp pair <ip>[:port]` remains
+//! If mDNS is blocked by a firewall, manual `lanfp peer add <ip>[:port]` remains
 //! the primary fallback.
 
 use anyhow::{Context, Result};

@@ -22,12 +22,12 @@
 ## Discovery and Pairing
 
 - mDNS may be blocked by firewalls, AP client isolation, VPNs or the macOS 15+ "Local Network"
-  privacy permission. Fallback: `lanfp pair <ip>`, `lanfp pair <ip>:<port>`.
+  privacy permission. Fallback: `lanfp peer add <ip>`, `lanfp peer add <ip>:<port>`.
 - The UUID shown for an unpaired device in `lanfp scan` comes from its mDNS TXT record and is
   unauthenticated; it only becomes trustworthy once the device is paired.
 - mDNS advertises only the device name, UUID, protocol version and agent port; it never
   advertises the port inventory.
-- Only one `lanfp pair wait` is allowed at a time; a second initiator gets "busy" (exit code 6).
+- Only one `lanfp peer wait` is allowed at a time; a second initiator gets "busy" (exit code 6).
 - A 6-digit code has only 1,000,000 combinations; security relies on SPAKE2 + the 5-attempt limit
   + a 300-second TTL.
 - IPv6 link-local addresses need a scope id (e.g. `fe80::1%eth0`), and PEER parsing currently does

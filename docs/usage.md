@@ -12,8 +12,8 @@ other tools. CLI messages, table headers and JSON fields are in English.
 | Command | Description |
 |---|---|
 | `lanfp scan [--timeout 3s] [--json]` | Live mDNS scan, lists devices |
-| `lanfp pair <peer> [--code <code>] [--force] [--json]` | Initiate pairing |
-| `lanfp pair wait [--timeout 300s]` | Wait for a pairing request and show the 6-digit code |
+| `lanfp peer add <peer> [--code <code>] [--force] [--json]` | Pair with a device |
+| `lanfp peer wait [--timeout 300s]` | Wait for a pairing request and show the 6-digit code |
 | `lanfp peer list [--json]` | Paired devices with their stable IDs, addresses and state |
 | `lanfp peer set-address <peer> <ip[:port]> [--json]` | Update the stored address of a paired device |
 | `lanfp local [--json]` | Local TCP services (lanfp itself and forwarded listeners are excluded) |
@@ -26,7 +26,16 @@ other tools. CLI messages, table headers and JSON fields are in English.
 | `lanfp daemon start\|stop\|status` | Manage the background instance |
 | `lanfp daemon install\|uninstall` | Register/remove login autostart |
 
-Run `lanfp <command> --help` for the exact options of a command.
+Run `lanfp <command> --help` for the exact options of a command. For a grouped command, use
+`lanfp <group> <command> --help`.
+
+## Command model
+
+Commands are either flat actions (`scan`, `local`, `remote`, `inbound`, `serve`) or a noun group
+with verbs (`peer`, `forward`, `daemon`). A group exists only when one resource has several
+verbs; a one-off action stays a top-level command. This keeps the top-level list short while
+`lanfp <group> --help` documents a whole resource. `lanfp peer wait` is interactive and
+text-only, so it has no `--json` output.
 
 ## Peer identifiers and selectors
 
@@ -109,7 +118,7 @@ devices.
 | 3 | Device / rule not found |
 | 4 | Device not paired or offline |
 | 5 | Listening port already in use / bind failure |
-| 6 | Peer is not running `lanfp pair wait` |
+| 6 | Peer is not running `lanfp peer wait` |
 | 7 | Insufficient permission (listen on `<1024`) |
 | 8 | Target port is not in the peer's listening-port inventory |
 | 9 | Pairing failed / wrong code / expired |

@@ -91,11 +91,11 @@ HTTP targets were local Python servers (macOS 18100/18101, Linux 18110).
 | Check | Result |
 |---|---|
 | mDNS discovery | `lanfp scan` found the peer in both directions on the first 3 s query, `PEER`/`PORT`/`STATE` and `--json` correct |
-| Pairing without `pair wait` | Exit 6 in 7 ms, no connection stall |
+| Pairing without `peer wait` | Exit 6 in 7 ms, no connection stall |
 | Wrong pairing code | Five attempts, each exit 9; the waiter reported the decreasing attempt count and failed after the fifth |
 | Pairing after 15 s code entry | Succeeded on both sides; both pinned TLS sessions came up |
 | Pairing persistence | Restarting either daemon kept `peers: 1 paired, 1 online`; sessions and inventories recovered automatically |
-| Manual address fallback | A second isolated Linux instance (agent 47820, mDNS off) was paired with `lanfp pair 192.168.8.10:47820`, exercising the bare `ip:port` selector |
+| Manual address fallback | A second isolated Linux instance (agent 47820, mDNS off) was paired with `lanfp peer add 192.168.8.10:47820`, exercising the bare `ip:port` selector |
 | `lanfp remote` | Full Native inventory of the peer, correct ownership and `FORWARDED` column; two peers listed together; non-default agent port shown as `nix@192.168.8.10:47820` |
 | Offline peer | `remote` exits 0 and prints `skipping offline device(s): ...` on stderr when one of two peers is down; an explicit offline peer exits 4 |
 | Forward + curl | Linux `forward add ... 18100` → `curl 127.0.0.1:18100` returned the macOS target body; reverse direction (macOS → Linux 18110) worked as well |
@@ -126,9 +126,9 @@ first-run prompt). HTTP targets were a PowerShell `TcpListener` on Windows 18100
 |---|---|
 | mDNS discovery | `lanfp scan` found the peer in both directions on the first 3 s query, with correct `PEER`/`PORT`/`STATE` |
 | Pairing (Linux initiates) | Code shown on Windows, entered on Linux; both sides completed and reported `1 paired, 1 online` |
-| Pairing (Windows initiates, manual address) | `lanfp pair 192.168.8.10:47920` against a second isolated Linux instance with mDNS off; the non-default agent port displayed as `nix@192.168.8.10:47920` |
-| Pairing without `pair wait` | Exit 6 in 8 ms |
-| `pair wait` already active | Second waiter exits 6 |
+| Pairing (Windows initiates, manual address) | `lanfp peer add 192.168.8.10:47920` against a second isolated Linux instance with mDNS off; the non-default agent port displayed as `nix@192.168.8.10:47920` |
+| Pairing without `peer wait` | Exit 6 in 8 ms |
+| `peer wait` already active | Second waiter exits 6 |
 | Wrong pairing code | Five attempts, each exit 9; the waiter reported the decreasing attempt count (4, 3, 2; the final decrement can fall between polls) and failed after the fifth |
 | Slow code entry | A 12 s delay before entering the code still paired (the 300 s TTL applies) |
 | Pairing persistence | Restarting either daemon kept `1 paired`; sessions recovered automatically |

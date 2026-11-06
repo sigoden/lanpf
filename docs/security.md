@@ -30,7 +30,7 @@ This document describes the trust boundaries, threat model and explicitly accept
 Flow (B is the device being paired):
 
 ```
-B: lanfp pair wait                     A: lanfp pair mac-mini@192.168.8.10
+B: lanfp peer wait                     A: lanfp peer add mac-mini@192.168.8.10
          │  <── PairHello(name, uuid, nonce_a, pubkey_a) ──│
          │  ── Challenge(nonce_b, uuid_b, pubkey_b) ──────>│
          │  shows 6-digit code                              │  enters code
@@ -54,7 +54,7 @@ B: lanfp pair wait                     A: lanfp pair mac-mini@192.168.8.10
   key added to the TLS known-key set.
 - A changed public key (device reinstall) is replaced only when the initiator passes `--force`;
   otherwise it is rejected.
-- The device being paired must explicitly run `lanfp pair wait` first, otherwise the initiator is
+- The device being paired must explicitly run `lanfp peer wait` first, otherwise the initiator is
   rejected immediately (exit code 6).
 - Only one waiting session is allowed at a time; a second initiator gets "busy".
 
@@ -63,7 +63,7 @@ B: lanfp pair wait                     A: lanfp pair mac-mini@192.168.8.10
 A 6-digit decimal code has only 1,000,000 possibilities, therefore:
 
 - it is displayed only on the terminal of the device being paired and never sent over the network;
-- each `pair wait` allows at most 5 attempts, after which waiting must start again;
+- each `peer wait` allows at most 5 attempts, after which waiting must start again;
 - the code expires together with the waiting session;
 - SPAKE2 makes offline dictionary attacks infeasible, and online attacks are bounded by the
   5-attempt limit.
