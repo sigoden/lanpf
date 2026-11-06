@@ -19,9 +19,9 @@ or configuring network gear.
 
 - **One-way authorization.** The machine that exposes a service authorizes the machine that may
   use it. No six-digit code, no waiting screen.
-- **Explicit exposure.** Expose every listening port by default, or switch to a whitelist and
-  decide exactly which ports authorized devices may reach. A port may be exposed before the
-  service starts listening.
+- **Explicit exposure.** Expose every listening port by default, or set the `agent.expose_ports`
+  whitelist in `config.toml` and decide exactly which ports (ranges included) authorized devices
+  may reach. A port may be exposed before the service starts listening.
 - **Port discovery.** See which ports the other machine is listening on or has exposed, instead
   of guessing.
 - **Local forwarding.** `lanfp forward add mac-mini 3000` opens `127.0.0.1:3000` on your machine.
@@ -87,20 +87,16 @@ Or pass the selector directly: `lanfp peer grant nix@192.168.8.11`.
 
 **3. Optionally restrict what `nix` may reach.**
 
-Without any `lanfp expose` entries, every listening port on `mac-mini` is exposed. Add a
-whitelist when you want to reduce that set:
+Without a whitelist (`agent.expose_ports` in `config.toml`), every listening port on `mac-mini`
+is exposed. Add a whitelist when you want to reduce that set:
 
-```sh
-$ lanfp expose add 3000
-exposed 3000
-$ lanfp expose list
-mode: whitelist (only listed ports are exposed)
-PORT   STATE       BIND         PROCESS   USER   INBOUND
-3000   listening   127.0.0.1    node      sigo   -
+```toml
+[agent]
+expose_ports = ["3000", "3001", "8000-8100"]
 ```
 
-A whitelist entry may be added before the service starts listening; `expose list` and `remote`
-show it as `not listening`.
+The running daemon hot-reloads `config.toml` within a few seconds. A whitelist entry may name a
+port before the service starts listening; `remote` shows it as whitelisted until it comes up.
 
 **4. On `nix`, see what `mac-mini` exposes.**
 
@@ -144,8 +140,9 @@ Some firewalls, VPNs and Wi-Fi access points block mDNS. Authorize by address in
 ```sh
 # On the exposing machine:
 lanfp peer grant 192.168.8.11
-# or, when the consumer's agent port is not 47811:
-lanfp peer grant 192.168.8.11:5000
+# or, when the consumer's agent listens on a non-default port
+# (its config.toml `[agent] listen`, not a forwarded service port):
+lanfp peer grant 192.168.8.11:47812
 ```
 
 If a device's address changes later, update it without granting again:
@@ -159,9 +156,9 @@ lanfp peer set-address mac-mini 192.168.8.23
 - **Authorization is one-way.** `lanfp peer grant` on the exposing machine lets the selected
   device connect and forward to exposed ports. It does not let the exposing machine access the
   consumer. `lanfp peer list` shows only devices this machine has authorized.
-- **Exposure is a whitelist.** With no entries, every listening Native port is exposed. Once
-  there is at least one entry, only those ports are exposed. Removing the last entry returns to
-  "all listening ports".
+- **Exposure is a config whitelist.** With an empty `agent.expose_ports`, every listening Native
+  port is exposed. Once the list has entries, only those ports (ranges included) are exposed;
+  emptying it returns to "all listening ports".
 - **No code-based pairing.** The grant is confirmed by the devices' Ed25519 identities and the
   public key advertised over mDNS; manually entered addresses are trust-on-first-use. Verify the
   printed fingerprint with `lanfp daemon status` on the other device if you need to.

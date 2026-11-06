@@ -134,7 +134,8 @@ impl Daemon {
             identity.public_key_bytes(),
             config.discovery.mdns,
         );
-        let expose = Arc::new(ExposeManager::load(db.clone())?);
+        let expose_ranges = config.agent.expose_ranges()?;
+        let expose = Arc::new(ExposeManager::load(expose_ranges));
 
         Ok(Arc::new(Self {
             paths,
@@ -207,6 +208,7 @@ impl Daemon {
                                     .send(ControlMessage::Exposure {
                                         mode: view.mode,
                                         ports: view.ports.clone(),
+                                        ranges: view.ranges.clone(),
                                     })
                                     .await;
                             }
@@ -304,6 +306,21 @@ impl Daemon {
                                 if new_config.discovery.mdns != old.discovery.mdns {
                                     tracing::warn!(
                                         "discovery.mdns changed; restart the daemon for it to take effect"
+                                    );
+                                }
+                                // agent.expose_ports takes effect immediately.
+                                if let Ok(ranges) = new_config.agent.expose_ranges() {
+                                    if ranges != daemon.expose.expose_ranges() {
+                                        daemon.expose.set_ranges(ranges);
+                                        tracing::info!("exposure whitelist reloaded");
+                                        let daemon = daemon.clone();
+                                        tokio::spawn(async move {
+                                            daemon.broadcast_exposure().await;
+                                        });
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        "cannot apply agent.expose_ports: invalid whitelist, keeping the previous one"
                                     );
                                 }
                                 *daemon.config.write().unwrap() = new_config;
@@ -441,9 +458,6 @@ impl Daemon {
                 self.peer_set_address_json(peer, address).await
             }
             Command::PeerList => self.peer_list_json(),
-            Command::ExposeList => self.expose_list_json().await,
-            Command::ExposeAdd { ports } => self.expose_add_json(ports).await,
-            Command::ExposeRemove { ports } => self.expose_remove_json(ports).await,
             Command::DaemonStop => Ok(serde_json::json!({"stopped": true})),
         };
         match result {
@@ -606,6 +620,7 @@ impl Daemon {
                         user: p.user,
                     })
                     .collect(),
+                ranges: Vec::new(),
             }
         };
         let ports = view
@@ -636,6 +651,7 @@ impl Daemon {
             port,
             online: true,
             mode: view.mode,
+            ranges: view.ranges,
             fingerprint: lanfp_crypto::fingerprint(&record.ed25519_pub),
             ports,
         }

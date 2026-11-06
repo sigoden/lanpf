@@ -111,6 +111,34 @@ impl std::fmt::Display for RuleState {
     }
 }
 
+/// An inclusive port range `[lo, hi]` (single ports have `lo == hi`). Used to
+/// carry the configured `agent.expose_ports` whitelist (ranges such as
+/// `3000-4000`) on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PortRange {
+    pub lo: u16,
+    pub hi: u16,
+}
+
+impl PortRange {
+    pub fn new(lo: u16, hi: u16) -> Self {
+        Self { lo, hi }
+    }
+
+    pub fn contains(&self, port: u16) -> bool {
+        port >= self.lo && port <= self.hi
+    }
+
+    /// `3000` for a single port, `3000-4000` for a range.
+    pub fn display(&self) -> String {
+        if self.lo == self.hi {
+            self.lo.to_string()
+        } else {
+            format!("{}-{}", self.lo, self.hi)
+        }
+    }
+}
+
 /// Exposure policy: `All` exposes every Native listening port; `Whitelist`
 /// exposes only the configured ports (which may or may not be listening).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,11 +172,16 @@ pub struct ExposedPort {
     pub user: Option<String>,
 }
 
-/// The complete exposure view advertised to a session.
+/// The complete exposure view advertised to a session. In whitelist mode,
+/// `ports` lists the configured whitelist entries that are currently listening
+/// (with details) and `ranges` carries the configured whitelist itself, so
+/// entries inside a range count as exposed even before the service listens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExposureView {
     pub mode: ExposeMode,
     pub ports: Vec<ExposedPort>,
+    #[serde(default)]
+    pub ranges: Vec<PortRange>,
 }
 
 impl Default for ExposureView {
@@ -156,6 +189,7 @@ impl Default for ExposureView {
         Self {
             mode: ExposeMode::All,
             ports: Vec::new(),
+            ranges: Vec::new(),
         }
     }
 }
@@ -182,6 +216,8 @@ pub enum ControlMessage {
     Exposure {
         mode: ExposeMode,
         ports: Vec<ExposedPort>,
+        #[serde(default)]
+        ranges: Vec<PortRange>,
     },
     RuleUpsert {
         rule_id: Uuid,
@@ -478,6 +514,7 @@ mod tests {
                     process: Some("node".into()),
                     user: Some("sigo".into()),
                 }],
+                ranges: vec![PortRange { lo: 3000, hi: 4000 }],
             },
             ControlMessage::RuleUpsert {
                 rule_id: Uuid::new_v4(),

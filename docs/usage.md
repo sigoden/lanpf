@@ -16,9 +16,6 @@ other tools. CLI messages, table headers and JSON fields are in English.
 | `lanfp peer grant [PEER]... [--force] [--json]` | Authorize devices; without PEER, scan and pick one |
 | `lanfp peer revoke <PEER>... [--json]` | Revoke authorization and drop existing sessions |
 | `lanfp peer set-address <peer> <ip[:port]> [--json]` | Update the stored address of a known device |
-| `lanfp expose list [--json]` | Show the effective exposure view |
-| `lanfp expose add <PORT>... [--json]` | Add ports to the whitelist (they need not be listening) |
-| `lanfp expose remove <PORT>... [--json]` | Remove ports from the whitelist |
 | `lanfp local [--json]` | Local TCP services (lanfp itself and forwarded listeners are excluded) |
 | `lanfp remote [peer] [--json]` | Exposed ports of servers that authorized this machine |
 | `lanfp forward add <peer> <target_port> [--listen <port>] [--json]` | Create a forward |
@@ -35,7 +32,7 @@ Run `lanfp <command> --help` for the exact options of a command. For a grouped c
 ## Command model
 
 Commands are either flat actions (`scan`, `local`, `remote`, `inbound`, `serve`) or a noun group
-with verbs (`peer`, `expose`, `forward`, `daemon`). A group exists only when one resource has
+with verbs (`peer`, `forward`, `daemon`). A group exists only when one resource has
 several verbs; a one-off action stays a top-level command. `lanfp peer grant` without a selector
 is interactive and text-only; `--json` requires at least one `PEER`.
 
@@ -77,34 +74,34 @@ the host does not appear in `peer list`; it appears in `remote` and in `scan` as
 
 ## Exposure
 
-Exposure is machine-wide and has two modes:
+Exposure is machine-wide and configured in `config.toml` via the `agent.expose_ports` whitelist
+(single ports and inclusive ranges). It has two modes:
 
-- **all** (default): every Native listening port is exposed. No `expose` rows exist.
-- **whitelist**: only the configured ports are exposed. This mode starts as soon as the first
-  port is added.
+- **all** (default): the whitelist is empty — every Native listening port is exposed.
+- **whitelist**: the whitelist has entries — only ports covered by it are exposed.
 
-```sh
-$ lanfp expose add 3000 3001
-exposed 3000,3001
-warning: whitelist mode enabled; only ports in `lanfp expose list` are accessible
+The whitelist takes effect on daemon start and is hot-reloaded: the running daemon picks config
+file changes up within a few seconds and re-advertises the view to its peers automatically.
 
-$ lanfp expose list
-mode: whitelist (only listed ports are exposed)
-PORT   STATE          BIND         PROCESS   USER   INBOUND
-3000   listening      127.0.0.1    node      sigo   52714
-3001   not listening  -            -         -      -
+```toml
+[agent]
+expose_ports = ["80", "443", "3000-4000", "8000-8100"]
 ```
 
-- A port does **not** need to be listening when it is added. It remains in the whitelist and is
-  reported as `not listening` until a service binds it.
-- `lanfp expose remove` accepts one or more ports; if any requested port is not in the list the
-  command changes nothing (exit 3). Removing the last entry returns to `mode: all` and prints a
-  warning.
-- The agent port and local forwarding listeners are not valid expose targets (exit 2).
-- The consumer sees the same view through `lanfp remote`: in `all` mode it lists every listening
-  port; in `whitelist` mode it lists the configured ports with a `listening` / `not listening`
-  state. Ports that are listening but not exposed are not shown.
-- In whitelist mode, `lanfp forward add` accepts a non-listening exposed port. The rule is
+An invalid entry (port `0`, a reversed range such as `2000-1000`, non-numeric text) fails the
+daemon at startup or is warned about and ignored during a hot reload.
+
+- A whitelist port does **not** need to be listening. It stays exposed while the service is down
+  and starts forwarding as soon as something binds it.
+- Ranges behave like the ports inside them: any listening port within `[3000, 4000]` is exposed,
+  including ports that were not listening when the config was written. Non-listening in-range
+  ports are listed as whitelisted to the consumer.
+- The agent port is never exposed, even if a range spans it. The agent port and local forwarding
+  listeners are never valid forward targets.
+- The consumer sees the peer's exposure view through `lanfp remote`: in `all` mode it lists every
+  listening port; in `whitelist` mode it lists the listening whitelisted ports and the configured
+  ranges. Ports that are listening but not exposed are not shown.
+- In whitelist mode, `lanfp forward add` accepts a non-listening whitelist target. The rule is
   created as `target_gone` and becomes `active` automatically when the service starts listening.
 - `lanfp inbound` is unchanged: it lists only ports that are currently being forwarded by other
   devices (active `inbound_ref` rows).
@@ -171,7 +168,7 @@ $ lanfp peer set-address mac-mini 192.168.8.23
 updated mac-mini@192.168.8.23 [5e6f7a8b] (online)
 ```
 
-The port defaults to 47811; use `<ip>:47811` for a non-default agent port. `--json` prints
+The port defaults to 47811; use `<ip>:<port>` for a non-default agent port. `--json` prints
 `{schema, peer, id, address, online}`. An established session is left untouched; the new address
 is used for the next dial.
 
@@ -199,8 +196,8 @@ The `--json` output of every data command is a single object carrying `schema: 2
 With `--json`, stdout contains only JSON; error messages go to stderr. Peer-scoped entries carry
 an `id` (full UUID; `ForwardInfo` calls it `peer_id`), and `lanfp daemon status` carries
 `device_id` and `fingerprint` for this machine. `lanfp remote` returns the peer's exposure
-`mode` and a `listening` flag per port; it also returns `offline_peers` with the IDs of skipped
-devices.
+`mode`, the configured whitelist `ranges` and a `listening` flag per port; it also returns
+`offline_peers` with the IDs of skipped devices.
 
 `lanfp peer grant --json` returns `{schema, granted: [...], failed: [...]}`; a non-empty `failed`
 array makes the command exit non-zero.
@@ -210,8 +207,8 @@ array makes the command exit non-zero.
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Invalid arguments or ambiguous peer selector |
-| 3 | Device / rule / expose entry not found |
+| 2 | Invalid arguments (including an invalid `agent.expose_ports`) or ambiguous peer selector |
+| 3 | Device / rule not found |
 | 4 | Device not authorized, not a known server, or offline |
 | 5 | Listening port already in use / bind failure |
 | 7 | Insufficient permission (listen on `<1024`) |
@@ -229,6 +226,9 @@ Windows: `%APPDATA%\lanfp\config.toml`. The file is generated automatically on f
 listen = "0.0.0.0:47811"
 max_streams = 256
 idle_timeout_secs = 1800
+# Exposure whitelist: single ports and inclusive ranges ("3000-4000").
+# An empty list exposes every Native listening port.
+expose_ports = []
 
 [discovery]
 mdns = true
@@ -238,9 +238,10 @@ scan_timeout_secs = 3
 interval_ms = 2000
 ```
 
-After a change, the background instance hot-reloads within about 5 seconds; changes to
-`agent.listen` and `discovery.mdns` take effect only after
-`lanfp daemon stop && lanfp daemon start`. An old `[pairing]` section is ignored.
+After a change, the background instance hot-reloads within about 5 seconds. `agent.listen` and
+`discovery.mdns` take effect only after `lanfp daemon stop && lanfp daemon start`. An old
+`[pairing]` section is ignored. On an old database, the retired `expose` table is dropped
+automatically; exposure is config-owned now.
 
 Set `LANFP_HOME=/some/dir` to collect all configuration, data, identity and log paths under that
 directory for tests or portable runs.

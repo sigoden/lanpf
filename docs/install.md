@@ -153,7 +153,7 @@ Common issues:
 - Upgrading the binary does not change the identity keys (`identity.key` is persisted).
 - Deleting the data directory or reinstalling the OS generates new keys; the peer must then
   re-authorize this device with `lanfp peer grant <peer> --force`.
-- Backing up the data directory preserves identity, authorization records, expose entries and
+- Backing up the data directory preserves identity, authorization records and
   forwarding rules.
 
 ## Uninstall

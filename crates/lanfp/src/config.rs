@@ -1,6 +1,7 @@
 //! Configuration file (`config.toml`).
 
 use anyhow::{bail, Context, Result};
+use lanfp_core::protocol::PortRange;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -23,6 +24,10 @@ pub struct AgentConfig {
     pub listen: String,
     pub max_streams: usize,
     pub idle_timeout_secs: u64,
+    /// Whitelist of ports forwarded peers may reach on this machine: single
+    /// ports (`"80"`) and inclusive ranges (`"3000-4000"`). Empty or missing
+    /// exposes every Native listening port.
+    pub expose_ports: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +49,7 @@ impl Default for AgentConfig {
             listen: DEFAULT_AGENT_LISTEN.to_string(),
             max_streams: 256,
             idle_timeout_secs: 1800,
+            expose_ports: Vec::new(),
         }
     }
 }
@@ -99,6 +105,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         self.agent.listen_addr()?;
+        self.agent.expose_ranges()?;
         if self.agent.max_streams == 0 {
             bail!("agent.max_streams must be greater than zero");
         }
@@ -126,6 +133,56 @@ impl AgentConfig {
         self.listen
             .parse()
             .with_context(|| format!("invalid agent.listen address `{}`", self.listen))
+    }
+
+    /// Parse and normalize `expose_ports` into sorted, non-overlapping ranges.
+    pub fn expose_ranges(&self) -> Result<Vec<PortRange>> {
+        let mut ranges: Vec<PortRange> = Vec::new();
+        for item in &self.expose_ports {
+            let item = item.trim();
+            if item.is_empty() {
+                bail!("agent.expose_ports must not contain empty entries");
+            }
+            let range =
+                match item.split_once('-') {
+                    Some((lo, hi)) => {
+                        let lo: u16 = lo.trim().parse().with_context(|| {
+                            format!("invalid agent.expose_ports entry `{item}`")
+                        })?;
+                        let hi: u16 = hi.trim().parse().with_context(|| {
+                            format!("invalid agent.expose_ports entry `{item}`")
+                        })?;
+                        if lo > hi {
+                            bail!("agent.expose_ports entry `{item}` has a reversed port range");
+                        }
+                        PortRange::new(lo, hi)
+                    }
+                    None => {
+                        let port: u16 = item.parse().with_context(|| {
+                            format!("invalid agent.expose_ports entry `{item}`")
+                        })?;
+                        PortRange::new(port, port)
+                    }
+                };
+            if range.lo == 0 {
+                bail!("agent.expose_ports entry `{item}`: port 0 is not a valid expose target");
+            }
+            ranges.push(range);
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<PortRange> = Vec::new();
+        for range in ranges {
+            match merged.last_mut() {
+                // Overlapping or directly adjacent ranges are folded together.
+                Some(last) if range.lo <= last.hi.saturating_add(1) => {
+                    if range.hi > last.hi {
+                        last.hi = range.hi;
+                    }
+                }
+                _ => merged.push(range),
+            }
+        }
+        Ok(merged)
     }
 }
 
@@ -194,6 +251,68 @@ mod tests {
         let mut c = Config::default();
         c.agent.listen = "not-an-address".into();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn parses_expose_ports_ranges() {
+        let mut c = Config::default();
+        c.agent.expose_ports = vec![
+            "80".into(),
+            "3000-4000".into(),
+            "1024".into(),
+            "3002 - 3999".into(),
+            "2000-5000".into(),
+        ];
+        let ranges = c.agent.expose_ranges().unwrap();
+        // Single ports, trimmed ranges, overlaps and adjacency merged.
+        assert_eq!(
+            ranges,
+            vec![
+                PortRange::new(80, 80),
+                PortRange::new(1024, 1024),
+                PortRange::new(2000, 5000),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_expose_ports_is_empty() {
+        let c = Config::default();
+        assert!(c.agent.expose_ranges().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_bad_expose_ports() {
+        for bad in [
+            ["0"],
+            ["3000-2000"],
+            ["abc"],
+            ["80.5"],
+            [""],
+            ["  "],
+            ["-"],
+            ["3000-x"],
+            ["3000-"],
+            ["65536"],
+            ["3000-4000-5000"],
+        ] {
+            let mut c = Config::default();
+            c.agent.expose_ports = bad.iter().map(|s| s.to_string()).collect();
+            assert!(
+                c.agent.expose_ranges().is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_range_is_allowed() {
+        let mut c = Config::default();
+        c.agent.expose_ports = vec!["1024-65535".into()];
+        assert_eq!(
+            c.agent.expose_ranges().unwrap(),
+            vec![PortRange::new(1024, 65535)]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Implementation of the CLI subcommands (client side).
 
-use crate::cli::{Commands, DaemonCmd, ExposeCmd, ForwardCmd, PeerCmd};
+use crate::cli::{Commands, DaemonCmd, ForwardCmd, PeerCmd};
 use crate::client::{self, CliError};
 use crate::config::{parse_duration, Config};
 use crate::daemon;
@@ -10,7 +10,6 @@ use crate::paths::Paths;
 use crate::util::{format_uptime, print_json, relative_time};
 use lanfp_core::error::ExitCode;
 use lanfp_core::ipc::*;
-use lanfp_core::protocol::ExposeMode;
 use lanfp_core::{short_id, short_ids, PROTOCOL_VERSION};
 use serde::de::DeserializeOwned;
 use std::io::{IsTerminal, Write};
@@ -56,11 +55,6 @@ pub async fn dispatch(command: Commands) -> Result<(), CliError> {
             PeerCmd::Grant(args) => peer_grant(args).await,
             PeerCmd::Revoke(args) => peer_revoke(args).await,
             PeerCmd::SetAddress(args) => peer_set_address(args).await,
-        },
-        Commands::Expose(cmd) => match cmd {
-            ExposeCmd::List(args) => expose_list(args).await,
-            ExposeCmd::Add(args) => expose_add(args).await,
-            ExposeCmd::Remove(args) => expose_remove(args).await,
         },
         Commands::Local(args) => local(args).await,
         Commands::Remote(args) => remote(args).await,
@@ -331,87 +325,6 @@ async fn peer_set_address(args: crate::cli::PeerSetAddressArgs) -> Result<(), Cl
     Ok(())
 }
 
-async fn expose_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
-    let paths = paths()?;
-    let response = client::call(&paths, Command::ExposeList, true).await?;
-    let result: ExposeListResult = decode(response.data)?;
-    if args.json {
-        return print_json(&result).map_err(CliError::internal);
-    }
-    match result.mode {
-        ExposeMode::All => println!(
-            "mode: all (every listening port is exposed, including ports that start listening later)"
-        ),
-        ExposeMode::Whitelist => {
-            println!("mode: whitelist (only listed ports are exposed)")
-        }
-    }
-    if result.ports.is_empty() {
-        println!("no listening ports");
-        return Ok(());
-    }
-    let rows: Vec<Vec<String>> = result
-        .ports
-        .iter()
-        .map(|p| {
-            let inbound = p.inbound.iter().map(|i| i.peer_listen).collect::<Vec<_>>();
-            vec![
-                p.port.to_string(),
-                if p.listening {
-                    "listening".into()
-                } else {
-                    "not listening".into()
-                },
-                if p.bind.is_empty() {
-                    "-".into()
-                } else {
-                    p.bind.join(",")
-                },
-                p.process.clone().unwrap_or_else(|| "-".into()),
-                p.user.clone().unwrap_or_else(|| "-".into()),
-                join_ports(&inbound),
-            ]
-        })
-        .collect();
-    print_table(
-        &["PORT", "STATE", "BIND", "PROCESS", "USER", "INBOUND"],
-        &rows,
-    );
-    Ok(())
-}
-
-async fn expose_add(args: crate::cli::ExposeAddArgs) -> Result<(), CliError> {
-    let paths = paths()?;
-    let response = client::call(&paths, Command::ExposeAdd { ports: args.ports }, true).await?;
-    let result: ExposeAddResult = decode(response.data)?;
-    if args.json {
-        print_json(&result).map_err(CliError::internal)?;
-    } else {
-        println!("exposed {}", join_ports(&result.ports));
-        if result.mode_changed {
-            eprintln!(
-                "warning: whitelist mode enabled; only ports in `lanfp expose list` are accessible"
-            );
-        }
-    }
-    Ok(())
-}
-
-async fn expose_remove(args: crate::cli::ExposeRemoveArgs) -> Result<(), CliError> {
-    let paths = paths()?;
-    let response = client::call(&paths, Command::ExposeRemove { ports: args.ports }, true).await?;
-    let result: ExposeRemoveResult = decode(response.data)?;
-    if args.json {
-        print_json(&result).map_err(CliError::internal)?;
-    } else {
-        println!("removed {}", join_ports(&result.ports));
-        if result.mode_changed {
-            eprintln!("warning: whitelist is empty; every listening port is exposed again");
-        }
-    }
-    Ok(())
-}
-
 async fn local(args: crate::cli::JsonArgs) -> Result<(), CliError> {
     let paths = paths()?;
     let response = client::call(&paths, Command::Local, true).await?;
@@ -478,6 +391,20 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
                 } else {
                     format!("-> {}", join_ports(&port.forwarded))
                 },
+            ]);
+        }
+        // Whitelist ranges may cover ports that are not listening; surface
+        // them so the consumer learns the server's exposure policy.
+        for range in &peer.ranges {
+            ids.push(peer.id);
+            rows.push(vec![
+                peer.peer.clone(),
+                range.display(),
+                "whitelisted".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
             ]);
         }
     }

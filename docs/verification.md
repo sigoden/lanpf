@@ -12,7 +12,7 @@ This document records automated coverage and real-hardware acceptance for `lanfp
 | `lanfp-core` | Frame and IPC codecs, protocol messages, grant/exposure message round-trips, peer selectors and display names |
 | `lanfp-crypto` | Identity persistence, Ed25519 signatures, grant/identity transcripts, fingerprints, TLS certificate parsing and key pinning |
 | `lanfp-inventory` | Port classification, native filtering, self-listener exclusion, macOS `netstat` parsing |
-| `lanfp` | Configuration, database trust directions and migration, expose policy, discovery TXT parsing, output helpers and CLI utilities |
+| `lanfp` | Configuration, database trust directions and migration, exposure policy, discovery TXT parsing, output helpers and CLI utilities |
 | Loopback E2E | Two daemons, one-way grant, session establishment, exposure/listening views, non-listening whitelist targets, revocation, forwarding (100 MiB transfer, half-close, 100 concurrent streams, automatic listen-port selection), IPC privacy, exit codes, JSON, rule recovery, peer selectors and address updates |
 
 The E2E file is `#![cfg(unix)]`, so Windows compiles and runs the unit tests only. CI builds,
@@ -36,14 +36,16 @@ The loopback suite asserts, among other things:
   `peer list` is empty, and the consumer's `remote` lists the host as a known server.
 - An ungranted consumer's `remote`/`forward add` is rejected (exit 4).
 - `peer revoke` drops the session and clears the host's inbound references.
-- `expose` defaults to all listening ports; a whitelist hides unlisted ports and exposes
-  configured ports that are not listening with a `not listening` state.
-- `forward add` accepts a non-listening whitelist port, creates a `target_gone` rule, and the
-  rule becomes active when the service starts listening.
-- Removing an exposed port rejects the active rule and clears inbound; returning to `mode: all`
-  recovers it.
-- Removing a missing port is all-or-nothing (exit 3).
-- Rules, trust records and expose entries survive a daemon restart.
+- Exposure defaults to all listening ports; a whitelist (`agent.expose_ports` in `config.toml`
+  with single ports and `3000-4000` ranges) hides ports outside the whitelist and lets a
+  whitelisted port be forwarded before it listens.
+- A range whitelist covers in-range non-listening targets; `forward add` creates a `target_gone`
+  rule, and the rule becomes active when the service starts listening.
+- A listening port outside the whitelist is rejected (exit 8).
+- Rewriting the config while the daemon runs hot-reloads the whitelist; the consumer's `remote`
+  view follows without a restart.
+- `lanfp expose ...` is removed from the CLI surface (exit 2).
+- Rules, trust records survive a daemon restart.
 - JSON output uses `schema: 2`.
 
 ## Real-Hardware Acceptance (Historical)

@@ -8,7 +8,9 @@ use anyhow::{bail, Context as _, Result};
 use futures::io::{AsyncRead, AsyncWrite};
 use lanfp_core::frame::{read_json, write_json};
 use lanfp_core::peer::PeerAddr;
-use lanfp_core::protocol::{ControlMessage, DataHeader, ExposureView, PortInfo, RuleState};
+use lanfp_core::protocol::{
+    ControlMessage, DataHeader, ExposureView, PortInfo, PortRange, RuleState,
+};
 use lanfp_core::{build_id, DATA_HEADER_LEN, GRANT_MAGIC, IDENTITY_MAGIC, PROTOCOL_VERSION};
 use lanfp_crypto::tls::ed25519_pubkey_from_cert;
 use lanfp_crypto::TLS_SERVER_NAME;
@@ -444,6 +446,7 @@ impl Daemon {
             .send(ControlMessage::Exposure {
                 mode: exposure.mode,
                 ports: exposure.ports,
+                ranges: exposure.ranges,
             })
             .await;
         let rules = rules_for_peer_snapshot(self, peer_id);
@@ -527,8 +530,16 @@ impl Daemon {
                 let _ = self.db.touch_peer_inbound(handle.peer_id, now);
                 self.recompute_rules_for_peer(handle.peer_id).await;
             }
-            ControlMessage::Exposure { mode, ports } => {
-                *handle.exposure.write().unwrap() = ExposureView { mode, ports };
+            ControlMessage::Exposure {
+                mode,
+                ports,
+                ranges,
+            } => {
+                *handle.exposure.write().unwrap() = ExposureView {
+                    mode,
+                    ports,
+                    ranges,
+                };
                 handle.exposure_received.store(true, Ordering::Relaxed);
             }
             ControlMessage::RuleUpsert {
@@ -538,7 +549,7 @@ impl Daemon {
                 state,
             } => {
                 let _ = state;
-                let exposed = self.expose.is_exposed(target_port);
+                let exposed = target_port != self.agent_port && self.expose.is_exposed(target_port);
                 let native = if self.inventory.is_native(target_port) {
                     true
                 } else {
@@ -632,7 +643,7 @@ impl Daemon {
                 return;
             }
         };
-        if !self.expose.is_exposed(header.target_port) {
+        if header.target_port == self.agent_port || !self.expose.is_exposed(header.target_port) {
             tracing::warn!(
                 "peer {} requested non-exposed port {}",
                 handle.peer_name,
@@ -1104,5 +1115,18 @@ where
 /// Used by `forward add` to validate a peer's exposure view. Whitelist
 /// entries count even while they are not listening.
 pub fn peer_exposes_port(handle: &SessionHandle, port: u16) -> bool {
-    handle.exposure().ports.iter().any(|p| p.port == port)
+    let exposure = handle.exposure();
+    exposure.ports.iter().any(|p| p.port == port)
+        || exposure
+            .ranges
+            .binary_search_by(|r: &PortRange| {
+                if r.hi < port {
+                    std::cmp::Ordering::Less
+                } else if r.lo > port {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
 }

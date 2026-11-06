@@ -42,10 +42,8 @@ CREATE TABLE IF NOT EXISTS rule (
   updated_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS expose (
-  port INTEGER PRIMARY KEY,
-  created_at INTEGER NOT NULL
-);
+-- Retired: the expose whitelist moved to the config file (`agent.expose_ports`).
+DROP TABLE IF EXISTS expose;
 
 CREATE TABLE IF NOT EXISTS inbound_ref (
   peer_id TEXT NOT NULL,
@@ -469,46 +467,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn list_expose(&self) -> Result<Vec<u16>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT port FROM expose ORDER BY port")?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.into_iter().map(|p| p as u16).collect())
-    }
-
-    /// Insert ports, ignoring duplicates. Returns the number of new rows.
-    pub fn add_expose(&self, ports: &[u16]) -> Result<usize> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let mut inserted = 0usize;
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR IGNORE INTO expose (port, created_at) VALUES (?1, ?2)")?;
-            for port in ports {
-                inserted += stmt.execute(params![*port as i64, crate::util::now_ts()])?;
-            }
-        }
-        tx.commit()?;
-        Ok(inserted)
-    }
-
-    /// Remove ports. Returns the number of deleted rows.
-    pub fn remove_expose(&self, ports: &[u16]) -> Result<usize> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let mut removed = 0usize;
-        {
-            let mut stmt = tx.prepare("DELETE FROM expose WHERE port = ?1")?;
-            for port in ports {
-                removed += stmt.execute(params![*port as i64])?;
-            }
-        }
-        tx.commit()?;
-        Ok(removed)
-    }
-
     #[allow(dead_code)]
     pub fn count_rules(&self) -> Result<usize> {
         let conn = self.lock();
@@ -742,16 +700,31 @@ mod tests {
     }
 
     #[test]
-    fn expose_add_remove_and_count() {
-        let (_dir, db) = db();
-        assert!(db.list_expose().unwrap().is_empty());
-        assert_eq!(db.add_expose(&[3000, 3001, 3000]).unwrap(), 2);
-        assert_eq!(db.list_expose().unwrap(), vec![3000, 3001]);
-        assert_eq!(db.remove_expose(&[3000]).unwrap(), 1);
-        assert_eq!(db.list_expose().unwrap(), vec![3001]);
-        assert_eq!(db.remove_expose(&[9999]).unwrap(), 0);
-        assert_eq!(db.remove_expose(&[3001]).unwrap(), 1);
-        assert!(db.list_expose().unwrap().is_empty());
+    fn drops_retired_expose_table() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE expose (
+                   port INTEGER PRIMARY KEY,
+                   created_at INTEGER NOT NULL
+                 );
+                 INSERT INTO expose (port, created_at) VALUES (3000, 0);",
+            )
+            .unwrap();
+        }
+        let _db = Db::open(&path).unwrap();
+        let exists: i64 = {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'expose'",
+                [],
+                |r| r.get(0),
+            )
+        }
+        .unwrap();
+        assert_eq!(exists, 0);
     }
 
     #[test]

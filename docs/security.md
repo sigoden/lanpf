@@ -82,20 +82,25 @@ can be tricked into authorizing the wrong device. Verify fingerprints when that 
 
 ## Exposure Policy
 
-- The default is **all**: every Native TCP listening port can be reached by an authorized
-  device. No `expose` rows exist in this mode.
-- Adding the first `expose` entry switches to **whitelist** mode; only the listed ports are
-  exposed. Removing the last entry returns to all.
-- A whitelist entry does not have to be listening. It is advertised to authorized devices as
-  `listening: false` and becomes reachable when a service binds it.
+- The whitelist lives in `config.toml` (`agent.expose_ports`, single ports and inclusive ranges
+  such as `3000-4000`).
+- The default is **all**: with an empty whitelist, every Native TCP listening port can be reached
+  by an authorized device.
+- A non-empty whitelist switches to **whitelist** mode; only ports covered by it are exposed.
+  Ranges are stored sorted and merged (overlapping/adjacent ranges fold together).
+- A whitelist entry does not have to be listening. It is advertised to authorized devices as a
+  range and becomes reachable when a service binds it.
 - Exposure is machine-wide, not per device. Every authorized device sees the same set.
 - Enforcement is not only in the inventory shown to consumers:
   - `RuleUpsert` for a non-exposed or non-listening target is rejected and is not stored as an
     inbound reference;
-  - a data stream for a non-exposed port is rejected before dialing the target.
+  - a data stream for a non-exposed port is rejected before dialing the target; the agent port is
+    always rejected.
 - `lanfp inbound` remains read-only and shows only ports that are currently being forwarded by
   other devices.
-- The agent port and local forwarding listeners cannot be added to the expose list.
+- The agent port is never exposed, even if a whitelist range spans it; local forwarding listeners
+  are not Native inventory and are therefore never exposed.
+- The whitelist is hot-reloaded; an invalid `agent.expose_ports` keeps the previous whitelist.
 
 ## Target Boundaries
 

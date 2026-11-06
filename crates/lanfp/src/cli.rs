@@ -16,9 +16,6 @@ pub enum Commands {
     /// Authorize devices to access this machine, or manage known devices.
     #[command(subcommand)]
     Peer(PeerCmd),
-    /// Manage the ports exposed to authorized devices.
-    #[command(subcommand)]
-    Expose(ExposeCmd),
     /// List this machine's Native listening ports.
     Local(JsonArgs),
     /// List exposed ports of servers that authorized this machine.
@@ -110,36 +107,6 @@ pub struct PeerSetAddressArgs {
     /// New address as `<ip>[:port]`; the port defaults to 47811.
     #[arg(value_name = "ADDRESS")]
     pub address: String,
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ExposeCmd {
-    /// List the effective exposure view.
-    List(JsonArgs),
-    /// Add one or more ports to the whitelist (they need not be listening).
-    Add(ExposeAddArgs),
-    /// Remove one or more ports from the whitelist.
-    Remove(ExposeRemoveArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct ExposeAddArgs {
-    /// Ports to expose.
-    #[arg(value_name = "PORT", required = true, num_args = 1..)]
-    pub ports: Vec<u16>,
-    /// Print JSON instead of text.
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct ExposeRemoveArgs {
-    /// Ports to remove from the whitelist.
-    #[arg(value_name = "PORT", required = true, num_args = 1..)]
-    pub ports: Vec<u16>,
-    /// Print JSON instead of text.
     #[arg(long)]
     pub json: bool,
 }

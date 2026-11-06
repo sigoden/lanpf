@@ -44,13 +44,14 @@
 
 - Exposure is machine-wide, not per device. Every authorized device sees the same set of exposed
   ports.
-- An `expose` entry does not bind a service. Adding a port before it is listening is allowed and
-  appears as `not listening`; it becomes reachable only when a service actually listens on it.
+- The whitelist (`agent.expose_ports` in `config.toml`) does not bind a service. A whitelisted
+  port becomes reachable only when a service actually listens on it.
 - In `mode: all`, only currently listening ports can be listed; ports that start listening later
   are exposed automatically but cannot be shown in advance.
-- The agent port and local forwarding listeners cannot be exposed.
+- The agent port is never exposed; local forwarding listeners are not Native inventory and are
+  therefore never exposed either.
 - `lanfp inbound` shows only ports that are currently being forwarded by other devices; it does
-  not list the expose policy.
+  not list the exposure policy. There is no CLI to edit the whitelist; edit `config.toml`.
 
 ## Sessions and Forwarding
 
@@ -134,7 +135,7 @@
 
 The two-host LAN runs above were performed under the earlier pairing model. Port inventory,
 forwarding, offline/target-gone recovery and JSON results remain relevant, but the one-way
-authorization and expose view need a new real-hardware run. The loopback E2E suite covers the new
+authorization and exposure view need a new real-hardware run. The loopback E2E suite covers the new
 flow on Linux; see [Verification](verification.md).
 
 Windows specifics:

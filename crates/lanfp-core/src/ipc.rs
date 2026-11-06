@@ -4,7 +4,7 @@
 //! carries an `id` which is echoed in the response.
 
 use crate::error::ExitCode;
-use crate::protocol::{ExposeMode, PortInfo, RuleState};
+use crate::protocol::{ExposeMode, PortInfo, PortRange, RuleState};
 use crate::JSON_SCHEMA;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,14 +57,6 @@ pub enum Command {
     PeerSetAddress {
         peer: String,
         address: String,
-    },
-    /// Read the effective exposure view of this machine.
-    ExposeList,
-    ExposeAdd {
-        ports: Vec<u16>,
-    },
-    ExposeRemove {
-        ports: Vec<u16>,
     },
     DaemonStop,
 }
@@ -212,6 +204,9 @@ pub struct RemotePeer {
     pub online: bool,
     /// Exposure policy of the peer.
     pub mode: ExposeMode,
+    /// Whitelist ranges of the peer (`agent.expose_ports`); empty in `all` mode.
+    #[serde(default)]
+    pub ranges: Vec<PortRange>,
     /// SHA-256 of the peer's public key, hex encoded.
     pub fingerprint: String,
     pub ports: Vec<RemotePort>,
@@ -358,54 +353,6 @@ pub struct PeerListResult {
     pub peers: Vec<PeerListEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExposeInbound {
-    /// Stable UUID of the peer that owns the forward.
-    pub id: Uuid,
-    pub peer: String,
-    /// Local listening port on the forwarding device.
-    pub peer_listen: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExposePortInfo {
-    pub port: u16,
-    pub listening: bool,
-    #[serde(default)]
-    pub bind: Vec<String>,
-    #[serde(default)]
-    pub process: Option<String>,
-    #[serde(default)]
-    pub user: Option<String>,
-    #[serde(default)]
-    pub inbound: Vec<ExposeInbound>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExposeListResult {
-    pub schema: u32,
-    pub mode: ExposeMode,
-    pub ports: Vec<ExposePortInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExposeAddResult {
-    pub schema: u32,
-    pub ports: Vec<u16>,
-    pub mode: ExposeMode,
-    /// The command switched the machine from "all" to "whitelist".
-    pub mode_changed: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExposeRemoveResult {
-    pub schema: u32,
-    pub ports: Vec<u16>,
-    pub mode: ExposeMode,
-    /// The command emptied the whitelist and returned to "all".
-    pub mode_changed: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,11 +388,6 @@ mod tests {
                 peer: "a@1.2.3.4".into(),
                 address: "10.0.0.2:47811".into(),
             },
-            Command::ExposeList,
-            Command::ExposeAdd {
-                ports: vec![3000, 3001],
-            },
-            Command::ExposeRemove { ports: vec![3000] },
             Command::DaemonStop,
         ];
         for cmd in cmds {

@@ -4,7 +4,7 @@
 
 use lanfp_core::frame::{read_json, write_json};
 use lanfp_core::ipc::*;
-use lanfp_core::protocol::{ExposeMode, RuleState};
+use lanfp_core::protocol::{ExposeMode, PortRange, RuleState};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
@@ -38,11 +38,22 @@ struct Node {
 
 impl Node {
     async fn start() -> Node {
+        Self::start_with_expose_ports(&[]).await
+    }
+
+    /// Start with `agent.expose_ports` (the exposure whitelist) preset to
+    /// `entries` before the daemon boots.
+    async fn start_with_expose_ports(entries: &[String]) -> Node {
         let home = TempDir::new().unwrap();
         std::fs::create_dir_all(home.path().join("config")).unwrap();
         let port = free_port();
+        let whitelist = entries
+            .iter()
+            .map(|p| format!("\"{p}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let config = format!(
-            "[agent]\nlisten = \"127.0.0.1:{port}\"\n\n[discovery]\nmdns = false\n\n[inventory]\ninterval_ms = 200\n"
+            "[agent]\nlisten = \"127.0.0.1:{port}\"\nexpose_ports = [{whitelist}]\n\n[discovery]\nmdns = false\n\n[inventory]\ninterval_ms = 200\n"
         );
         std::fs::write(home.path().join("config/config.toml"), config).unwrap();
         let log = std::fs::File::create(home.path().join("serve.log")).unwrap();
@@ -790,49 +801,29 @@ async fn grant_is_one_way() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn expose_whitelist_and_non_listening() {
-    let a = Node::start().await;
-    let b = Node::start().await;
-    let peer = pair(&a, &b).await;
-    a.wait_online(1).await;
-
+async fn expose_whitelist_from_config_and_non_listening() {
+    // Ports must exist before the daemon boots: the whitelist is config-owned.
     let p1 = start_echo_server();
     let p3 = start_echo_server();
-    let p2 = free_port();
+    let p2 = free_port(); // a whitelist port that is not listening yet
+    let a = Node::start().await;
+    let b = Node::start_with_expose_ports(&[p1.to_string(), p2.to_string()]).await;
+    let peer = pair(&a, &b).await;
+    a.wait_online(1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let add: ExposeAddResult = b
-        .call_ok(Command::ExposeAdd {
-            ports: vec![p1, p2],
-        })
-        .await;
-    assert_eq!(add.mode, ExposeMode::Whitelist);
-    assert!(add.mode_changed);
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
     let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
     let view = &remote.peers[0];
     assert_eq!(view.mode, ExposeMode::Whitelist);
-    let mut ports: Vec<u16> = view.ports.iter().map(|p| p.port).collect();
-    ports.sort_unstable();
-    let mut expected = vec![p1, p2];
-    expected.sort_unstable();
-    assert_eq!(ports, expected);
-    assert!(
-        view.ports
-            .iter()
-            .find(|p| p.port == p1)
-            .expect("p1")
-            .listening
-    );
-    assert!(
-        !view
-            .ports
-            .iter()
-            .find(|p| p.port == p2)
-            .expect("p2")
-            .listening
-    );
+    // The daemon stores and sends the whitelist sorted.
+    let mut expected_ranges = vec![PortRange::new(p1, p1), PortRange::new(p2, p2)];
+    expected_ranges.sort_unstable();
+    assert_eq!(view.ranges, expected_ranges);
+    // Only listening whitelist entries appear with details; p2 is covered by
+    // the whitelist but not listening, p3 is not in the whitelist at all.
+    let ports: Vec<u16> = view.ports.iter().map(|p| p.port).collect();
+    assert_eq!(ports, vec![p1]);
+    assert!(!ports.contains(&p2));
     assert!(!ports.contains(&p3));
 
     // The whitelist may contain a port before it listens.
@@ -872,72 +863,124 @@ async fn expose_whitelist_and_non_listening() {
         .inbound
         .iter()
         .any(|i| i.my_port == p2 && i.peer_listen == listen_port && i.online));
+}
 
-    // Removing p2 from the whitelist stops the forwarding and clears inbound.
-    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p2] }).await;
-    assert_eq!(removed.mode, ExposeMode::Whitelist);
-    assert!(!removed.mode_changed);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expose_range_covers_non_listening_ports() {
+    let lo = free_port();
+    let hi = lo + 100;
+    let inside_listening = lo + 10;
+    let inside_not_listening = lo + 50;
+    start_echo_server_on(inside_listening);
+    let a = Node::start().await;
+    let b = Node::start_with_expose_ports(&[format!("{lo}-{hi}")]).await;
+    let peer = pair(&a, &b).await;
+    a.wait_online(1).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let inbound: InboundResult = b.call_ok(Command::Inbound).await;
-    assert!(inbound.inbound.iter().all(|i| i.my_port != p2));
-    let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
-    let rule = list
-        .forwards
-        .iter()
-        .find(|f| f.local == listen_port)
-        .expect("rule");
-    assert_eq!(rule.state, RuleState::TargetGone);
 
-    // Removing the last entry returns to "all"; p2 is listening again and the
-    // rule recovers automatically.
-    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p1] }).await;
-    assert_eq!(removed.mode, ExposeMode::All);
-    assert!(removed.mode_changed);
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    let view = &remote.peers[0];
+    assert_eq!(view.mode, ExposeMode::Whitelist);
+    assert_eq!(view.ranges, vec![PortRange::new(lo, hi)]);
+    // Stray listeners from other tests may fall into the range; every
+    // reported listening port must at least be whitelisted.
+    let ports: Vec<u16> = view.ports.iter().map(|p| p.port).collect();
+    assert!(ports.contains(&inside_listening), "{ports:?}");
+    assert!(ports.iter().all(|p| *p >= lo && *p <= hi), "{ports:?}");
+
+    // The direct rule starts active and forwards end to end.
+    let listen_direct = free_port();
+    let added: ForwardAddResult = a
+        .call_ok(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: inside_listening,
+            listen: Some(listen_direct),
+        })
+        .await;
+    assert_eq!(added.state, RuleState::Active);
+    assert_eq!(
+        echo_roundtrip(listen_direct, b"range roundtrip"),
+        b"range roundtrip".to_vec()
+    );
+
+    // A target inside the range may be pre-created before it listens.
+    let listen_future = free_port();
+    let added: ForwardAddResult = a
+        .call_ok(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: inside_not_listening,
+            listen: Some(listen_future),
+        })
+        .await;
+    assert_eq!(added.state, RuleState::TargetGone);
+
+    // Start it: the rule recovers and forwarding works.
+    start_echo_server_on(inside_not_listening);
     tokio::time::sleep(Duration::from_millis(900)).await;
     let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
     let rule = list
         .forwards
         .iter()
-        .find(|f| f.local == listen_port)
+        .find(|f| f.local == listen_future)
         .expect("rule");
     assert_eq!(rule.state, RuleState::Active);
-    let inbound: InboundResult = b.call_ok(Command::Inbound).await;
-    assert!(inbound.inbound.iter().any(|i| i.my_port == p2));
+    assert_eq!(
+        echo_roundtrip(listen_future, b"recovered"),
+        b"recovered".to_vec()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn expose_multiple_ports_and_remove_errors() {
+async fn expose_ports_hot_reload_updates_the_view() {
+    let echo_port = start_echo_server();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let a = Node::start().await;
     let b = Node::start().await;
-    let p1 = free_port();
-    let p2 = free_port();
-    let add: ExposeAddResult = b
-        .call_ok(Command::ExposeAdd {
-            ports: vec![p1, p2, p1],
+    let _peer = pair(&a, &b).await;
+    a.wait_online(1).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Empty whitelist: blanket mode.
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    let view = &remote.peers[0];
+    assert_eq!(view.mode, ExposeMode::All);
+    assert!(!view.ports.is_empty());
+
+    // Rewrite the config with a whitelist; the watcher applies it live.
+    let config = format!(
+        "[agent]\nlisten = \"127.0.0.1:{}\"\nexpose_ports = [\"{}\"]\n\n[discovery]\nmdns = false\n\n[inventory]\ninterval_ms = 200\n",
+        b.port, echo_port
+    );
+    std::fs::write(b.home.path().join("config/config.toml"), config).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+        if remote.peers[0].mode == ExposeMode::Whitelist {
+            assert_eq!(
+                remote.peers[0].ranges,
+                vec![PortRange::new(echo_port, echo_port)]
+            );
+            let ports: Vec<u16> = remote.peers[0].ports.iter().map(|p| p.port).collect();
+            assert_eq!(ports, vec![echo_port]);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "hot reload did not reach the consumer in time"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // The consumer can now only forward to whitelisted ports.
+    let err = a
+        .call_err(Command::ForwardAdd {
+            peer: format!("127.0.0.1:{}", b.port),
+            target_port: b.port, // the agent port is never exposed
+            listen: Some(free_port()),
         })
         .await;
-    assert_eq!(add.mode, ExposeMode::Whitelist);
-    assert_eq!(add.ports, vec![p1, p2]);
-    assert!(add.mode_changed);
-
-    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p1] }).await;
-    assert_eq!(removed.mode, ExposeMode::Whitelist);
-    assert!(!removed.mode_changed);
-
-    let err = b
-        .call_err(Command::ExposeRemove {
-            ports: vec![p2, free_port()],
-        })
-        .await;
-    assert_eq!(err.code, 3, "{err:?}");
-    // The failed all-or-nothing removal did not change p2.
-    let list: ExposeListResult = b.call_ok(Command::ExposeList).await;
-    assert_eq!(list.mode, ExposeMode::Whitelist);
-    assert_eq!(list.ports.len(), 1);
-    assert_eq!(list.ports[0].port, p2);
-
-    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p2] }).await;
-    assert_eq!(removed.mode, ExposeMode::All);
-    assert!(removed.mode_changed);
+    assert_eq!(err.code, 8, "{err:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -984,7 +1027,7 @@ fn cli_surface_is_noun_grouped() {
     let help = run_cli(&["--help"]);
     assert!(help.status.success(), "{help:?}");
     let text = String::from_utf8_lossy(&help.stdout);
-    for group in ["peer", "expose", "forward", "daemon"] {
+    for group in ["peer", "forward", "daemon"] {
         assert!(text.contains(&format!("\n  {group} ")), "{text}");
     }
     assert!(!text.contains("\n  pair "), "{text}");
@@ -1005,21 +1048,11 @@ fn cli_surface_is_noun_grouped() {
         assert!(text.contains(option), "{text}");
     }
 
-    let expose = run_cli(&["expose", "--help"]);
-    assert!(expose.status.success(), "{expose:?}");
-    let text = String::from_utf8_lossy(&expose.stdout);
-    for sub in ["list", "add", "remove"] {
-        assert!(text.contains(sub), "{text}");
-    }
-    let add = run_cli(&["expose", "add", "--help"]);
-    assert!(add.status.success(), "{add:?}");
-    assert!(
-        String::from_utf8_lossy(&add.stdout).contains("PORT"),
-        "{add:?}"
-    );
-
-    // The old commands are gone.
+    // The old commands are gone; the whitelist moved to `agent.expose_ports`.
     assert_eq!(run_cli(&["pair", "127.0.0.1:1"]).status.code(), Some(2));
+    assert_eq!(run_cli(&["expose"]).status.code(), Some(2));
+    assert_eq!(run_cli(&["expose", "list"]).status.code(), Some(2));
+    assert_eq!(run_cli(&["expose", "add", "3000"]).status.code(), Some(2));
     assert_eq!(run_cli(&["peer", "add"]).status.code(), Some(2));
     assert_eq!(run_cli(&["peer", "wait"]).status.code(), Some(2));
 }
