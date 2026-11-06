@@ -23,7 +23,7 @@ cargo build --release -p lanpf
 
 ## Current status
 
-- CI builds, tests, formats and lints the workspace on Ubuntu, macOS and Windows (`.github/workflows/ci.yml`).
+- CI builds, tests, formats and lints the workspace on Ubuntu, macOS and Windows (`.github/workflows/ci.yaml`).
 - The loopback E2E suite runs on Unix (Linux and macOS); Windows runs the unit tests only.
 - macOS runs the full suite including the loopback E2E; Windows runs the unit tests. Both passed on the current tree.
 
