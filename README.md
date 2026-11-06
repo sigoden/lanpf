@@ -2,17 +2,28 @@
 
 **Reach a service on another computer in your LAN as if it were running on your own machine.**
 
-`lanpf` forwards TCP ports between computers on the same LAN. Install it on two machines, authorize one to use the other, then `127.0.0.1:3000` on your laptop reaches the dev server on your desktop. No router changes, no public exposure, no SSH tunnel, no root.
+`lanpf` forwards TCP ports between computers on the same LAN. Install it on two machines, authorize one to use the other, and `127.0.0.1:3000` on one machine reaches the dev server on the other. No router changes, no public exposure, no SSH tunnel, no root.
 
 ## Features
 
+**Forwarding**
+
+- **Local loopback forwarding.** `lanpf forward add <peer> 3000` opens `127.0.0.1:3000` on the machine running the command; `--listen` picks another port and `--listen 0` picks a free one.
+- **Zero-config discovery.** `lanpf scan` finds devices over mDNS, so you do not have to know addresses or ports; `lanpf local` and `lanpf remote` show what is listening on either side.
+
+**Access control**
+
 - **One-way authorization.** The machine that exposes a service authorizes the machine that may use it. No pairing code, no waiting screen, and no reciprocal access unless you grant it.
 - **Explicit exposure.** Share every listening port by default, or whitelist ports and ranges in `config.toml`. A whitelisted port can be shared before its service starts.
-- **Local loopback forwarding.** `lanpf forward add <peer> 3000` opens `127.0.0.1:3000` on your machine; `--listen` picks another port and `--listen 0` picks a free one.
-- **Zero-config discovery.** `lanpf scan` finds devices over mDNS; `lanpf local` and `lanpf remote` show what is listening or exposed, so you do not have to guess ports.
-- **Safe by default.** Forwarded ports bind `127.0.0.1`, the agent port is the only LAN-facing listener, and sessions use TLS 1.3 with pinned Ed25519 keys.
 - **Instant revocation.** `lanpf peer revoke` removes the key from the allow-list and drops the live session.
+
+**Trust and identity**
+
+- **Safe by default.** Forwarded ports bind `127.0.0.1`, the agent port is the only LAN-facing listener, and sessions use TLS 1.3 with pinned Ed25519 keys.
 - **Identity survives network changes.** A stable UUID and pinned key follow a device across IP changes, with `peer set-address` when mDNS cannot be used.
+
+**Operations**
+
 - **One binary, no root.** Linux, macOS and Windows; runs as your user with no system service, and login autostart is optional.
 - **Scriptable and self-starting.** `--json` with `schema: 2` plus stable exit codes; data commands auto-start the local daemon.
 
@@ -89,17 +100,6 @@ If 3000 is taken locally, `--listen 0` picks a free loopback port. Remove the fo
 ### If mDNS discovery fails
 
 Some firewalls, VPNs and Wi-Fi access points block mDNS. On `nix`, authorize `mac-mini` by address instead: `lanpf peer grant 192.168.8.11` (add `:port` when its agent port is not 47811). If `nix`'s address changes later, update it on `mac-mini` with `lanpf peer set-address nix 192.168.8.23`.
-
-## Good to know
-
-- **`peer list` is not everyone you know.** It lists only devices this machine authorized; on the consumer, servers appear in `remote` and in `scan` as `server`.
-- **Emptying the whitelist** returns to exposing every listening port. There is no per-device ACL: every authorized device sees the same set.
-- **Trust is pin-based.** The grant is confirmed by Ed25519 identities and, when available, the mDNS key; manual addresses are trust-on-first-use. Compare the printed fingerprint with `lanpf daemon status` if needed.
-- **Revocation is not pushed.** `peer revoke` drops the session immediately, but the consumer keeps an offline record until a later grant.
-- **TCP only.** No UDP, multi-hop, NAT traversal or public relay.
-- **`lanpf inbound`** is the read-only view of ports currently forwarded by other devices.
-
-Read the [security model](docs/security.md) before authorizing a device you do not fully control.
 
 ## Documentation
 

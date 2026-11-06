@@ -6,13 +6,18 @@
 
 Download the archive for your platform from [GitHub Releases](https://github.com/sigoden/lanpf/releases/latest), unpack it, and put `lanpf` (`lanpf.exe` on Windows) in a directory on your `PATH`.
 
-| Platform | Archive |
-|---|---|
-| Linux x86_64 | `lanpf-v*-x86_64-unknown-linux-musl.tar.gz` |
-| Linux arm64 | `lanpf-v*-aarch64-unknown-linux-musl.tar.gz` |
-| macOS Intel | `lanpf-v*-x86_64-apple-darwin.tar.gz` |
-| macOS Apple silicon | `lanpf-v*-aarch64-apple-darwin.tar.gz` |
-| Windows x64 | `lanpf-v*-x86_64-pc-windows-msvc.zip` |
+| Platform | Target | Archive |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-musl` | `lanpf-v*-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `aarch64-unknown-linux-musl` | `lanpf-v*-aarch64-unknown-linux-musl.tar.gz` |
+| Linux armv7 | `armv7-unknown-linux-musleabihf` | `lanpf-v*-armv7-unknown-linux-musleabihf.tar.gz` |
+| Linux armv6 | `arm-unknown-linux-musleabihf` | `lanpf-v*-arm-unknown-linux-musleabihf.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `lanpf-v*-x86_64-apple-darwin.tar.gz` |
+| macOS Apple silicon | `aarch64-apple-darwin` | `lanpf-v*-aarch64-apple-darwin.tar.gz` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `lanpf-v*-x86_64-pc-windows-msvc.zip` |
+| Windows arm64 | `aarch64-pc-windows-msvc` | `lanpf-v*-aarch64-pc-windows-msvc.zip` |
+
+The Linux binaries are statically linked against musl, so they run without matching system libraries.
 
 **Unix installer.** `install.sh` detects the platform, downloads the latest release and installs the binary:
 
