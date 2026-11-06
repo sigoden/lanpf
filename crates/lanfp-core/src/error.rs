@@ -1,4 +1,4 @@
-//! Stable exit codes documented in PLAN.md section 4.5.
+//! Stable exit codes, also documented in docs/usage.md.
 
 use serde::{Deserialize, Serialize};
 

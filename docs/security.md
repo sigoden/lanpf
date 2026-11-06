@@ -46,6 +46,8 @@ B: lanfp pair wait                     A: lanfp pair mac-mini@192.168.8.10
   code is never written to logs.
 - The pairing code is the SPAKE2 password. A wrong code yields a different session key, and the
   AEAD check fails, which aborts the pairing.
+- SPAKE2 uses the `spake2` crate with the Ed25519 group on both sides. Both devices run the same
+  implementation; interoperability with a different RFC 9382 implementation is not a goal.
 - The pairing transcript binds both UUIDs, both nonces and both public keys; both sides then sign
   the transcript with Ed25519.
 - Both sides do a final Done/Done confirmation; only on success is the `peer` row written and the

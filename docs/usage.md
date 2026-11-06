@@ -5,7 +5,7 @@ other subcommand is a short-lived client that talks to it over local IPC. Any da
 the background process automatically when needed, so `lanfp daemon start` is optional.
 
 The default output is a table. Every data command supports `--json` (`schema: 1`) for scripts and
-other tools.
+other tools. CLI messages, table headers and JSON fields are in English.
 
 ## Commands
 

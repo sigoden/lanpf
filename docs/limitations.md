@@ -104,13 +104,13 @@
 | Cross-host forwarding | Verified (Linux↔macOS, Linux↔Windows) | Verified (Linux↔macOS) | Verified (Linux↔Windows) |
 | `<1024` listen | Not possible (exit code 7 verified) | Not possible (exit code 7 verified in E2E) | Allowed for an administrator (port 80 verified) |
 
-macOS M1 (serve, IPC, auto-spawn, inventory, `local`, `daemon status`) is verified on real
-hardware, and so is Windows M1 (auto-spawn, named-pipe IPC, inventory, daemon lifecycle,
-per-`LANFP_HOME` isolation, HKCU Run registration). Two-host LAN acceptance runs passed M2–M4
-(discovery, pairing, `remote`, forwarding, removal, offline/target-gone recovery, exit codes and
-JSON) between Linux and macOS and between Linux and Windows. mDNS over Wi-Fi with AP isolation,
-the macOS "Local Network" permission prompt, real login activation of the autostart entries, and
-the loopback E2E suite on Windows remain untested.
+Real-hardware acceptance covers macOS 15.5 arm64 (serve, IPC, auto-spawn, inventory, `local`,
+`daemon status`) and Windows 11 25H2 (auto-spawn, named-pipe IPC, inventory, daemon lifecycle,
+per-`LANFP_HOME` isolation, HKCU Run registration). Two-host LAN runs between Linux and macOS and
+between Linux and Windows covered discovery, pairing, `remote`, forwarding, removal,
+offline/target-gone recovery, exit codes and JSON. mDNS over Wi-Fi with AP isolation, the macOS
+"Local Network" permission prompt, real login activation of the autostart entries, and the
+loopback E2E suite on Windows remain untested.
 
 Windows specifics:
 
@@ -124,10 +124,3 @@ Windows specifics:
   for long-running remote tests; a desktop logon is not affected.
 - The loopback E2E suite is `#![cfg(unix)]`; on Windows `cargo test --workspace` runs the unit
   tests only.
-
-## Output Language
-
-Section 19 of `PLAN.md` states "output in Chinese", but every example output in section 4.3 is in
-English. The current implementation follows the concrete examples: CLI messages, table headers
-and JSON fields are in English, and the documentation is in English as well. CLI message
-localization can be revisited in a later release if needed.
