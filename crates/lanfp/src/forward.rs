@@ -17,6 +17,41 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 impl Daemon {
+    /// Bind an OS-assigned loopback port for `forward add --listen 0`.
+    ///
+    /// The OS never assigns a port that another socket currently holds, but a
+    /// restored rule whose listener failed to bind can reserve a port in the
+    /// in-memory maps without holding a socket. Retry if that happens.
+    async fn bind_auto_listener(&self) -> Result<(TcpListener, u16), IpcError> {
+        for _ in 0..8 {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|err| {
+                ipc_err(
+                    ExitCode::ListenConflict,
+                    format!("cannot bind an automatic loopback port: {err}"),
+                )
+            })?;
+            let port = listener
+                .local_addr()
+                .map_err(|err| {
+                    ipc_err(
+                        ExitCode::ListenConflict,
+                        format!("cannot inspect an automatic loopback listener: {err}"),
+                    )
+                })?
+                .port();
+            let taken = port == self.agent_port
+                || self.forward_ports.read().unwrap().contains(&port)
+                || self.rules.read().unwrap().contains_key(&port);
+            if !taken {
+                return Ok((listener, port));
+            }
+        }
+        Err(ipc_err(
+            ExitCode::ListenConflict,
+            "cannot find a free automatic loopback port; pass an explicit --listen <port>",
+        ))
+    }
+
     pub async fn forward_add_json(
         self: &Arc<Self>,
         peer_selector: String,
@@ -47,35 +82,37 @@ impl Daemon {
                 ),
             ));
         }
-        let listen_port = listen.unwrap_or(target_port);
-        if listen_port == 0 {
-            return Err(ipc_err(ExitCode::Usage, "listen port must not be 0"));
-        }
-        if let Some(err) = low_port_error(listen_port) {
-            return Err(err);
-        }
-        if listen_port == self.agent_port {
-            return Err(ipc_err(
-                ExitCode::ListenConflict,
-                format!(
-                    "127.0.0.1:{listen_port} is lanfp's own agent port; choose another --listen port"
-                ),
-            ));
-        }
-        if self.forward_ports.read().unwrap().contains(&listen_port)
-            || self.rules.read().unwrap().contains_key(&listen_port)
-        {
-            return Err(ipc_err(
-                ExitCode::ListenConflict,
-                format!("a forwarding rule already exists on local port {listen_port}"),
-            ));
-        }
-
-        let listener = match TcpListener::bind(("127.0.0.1", listen_port)).await {
-            Ok(listener) => listener,
-            Err(err) => {
-                return Err(map_bind_error(self, listen_port, &err).await);
+        let requested_port = listen.unwrap_or(target_port);
+        let (listener, listen_port) = if requested_port == 0 {
+            self.bind_auto_listener().await?
+        } else {
+            if let Some(err) = low_port_error(requested_port) {
+                return Err(err);
             }
+            if requested_port == self.agent_port {
+                return Err(ipc_err(
+                    ExitCode::ListenConflict,
+                    format!(
+                        "127.0.0.1:{requested_port} is lanfp's own agent port; choose another --listen port"
+                    ),
+                ));
+            }
+            if self.forward_ports.read().unwrap().contains(&requested_port)
+                || self.rules.read().unwrap().contains_key(&requested_port)
+            {
+                return Err(ipc_err(
+                    ExitCode::ListenConflict,
+                    format!("a forwarding rule already exists on local port {requested_port}"),
+                ));
+            }
+
+            let listener = match TcpListener::bind(("127.0.0.1", requested_port)).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    return Err(map_bind_error(self, requested_port, &err).await);
+                }
+            };
+            (listener, requested_port)
         };
 
         let now = now_ts();

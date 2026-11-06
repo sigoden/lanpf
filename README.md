@@ -108,6 +108,9 @@ created 3000 -> mac-mini@192.168.8.10:3000 (active)
 $ curl http://127.0.0.1:3000
 ```
 
+If `3000` is already in use locally, add `--listen 0`; lanfp prints the free loopback port it
+picked.
+
 **6. Remove the forward when you are done.**
 
 ```sh

@@ -262,6 +262,83 @@ async fn pair_forward_and_remove() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_add_auto_listen_port() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let peer = pair(&a, &b).await;
+    a.wait_online(1).await;
+    let echo_port = start_echo_server();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Exercise clap, IPC and the daemon's automatic bind through the CLI.
+    let output = a.cli(&[
+        "forward",
+        "add",
+        &peer,
+        &echo_port.to_string(),
+        "--listen",
+        "0",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let first: ForwardAddResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert_ne!(first.local, 0);
+    assert_ne!(first.local, a.port);
+    assert!(first.local >= 1024, "unexpected port {}", first.local);
+    assert_eq!(first.target, echo_port);
+    assert_eq!(first.state, RuleState::Active);
+    assert_eq!(
+        echo_roundtrip(first.local, b"auto one"),
+        b"auto one".to_vec()
+    );
+
+    // A second automatic rule must get a different port and serve traffic too.
+    let second: ForwardAddResult = a
+        .call_ok(Command::ForwardAdd {
+            peer,
+            target_port: echo_port,
+            listen: Some(0),
+        })
+        .await;
+    assert_ne!(second.local, first.local);
+    assert_ne!(second.local, 0);
+    assert_eq!(
+        echo_roundtrip(second.local, b"auto two"),
+        b"auto two".to_vec()
+    );
+    assert_eq!(
+        echo_roundtrip(first.local, b"still one"),
+        b"still one".to_vec()
+    );
+
+    let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
+    for port in [first.local, second.local] {
+        let rule = list
+            .forwards
+            .iter()
+            .find(|f| f.local == port)
+            .unwrap_or_else(|| panic!("missing rule for auto port {port}"));
+        assert_eq!(rule.target, echo_port);
+    }
+
+    // The chosen port is the rule ID used for removal.
+    let removed: ForwardRemoveResult = a
+        .call_ok(Command::ForwardRemove {
+            local_port: first.local,
+        })
+        .await;
+    assert_eq!(removed.removed, first.local);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        TcpStream::connect(("127.0.0.1", first.local)).is_err(),
+        "auto listener should be closed after removal"
+    );
+    let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
+    assert!(list.forwards.iter().all(|f| f.local != first.local));
+    assert!(list.forwards.iter().any(|f| f.local == second.local));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn large_transfer_half_close_and_concurrency() {
     let a = Node::start().await;
     let b = Node::start().await;
@@ -450,6 +527,16 @@ async fn cli_reports_documented_exit_codes() {
     a.wait_online(1).await;
     let echo_port = start_echo_server();
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Port 0 is only special for --listen; a target port of 0 stays invalid.
+    let err = a
+        .call_err(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: 0,
+            listen: Some(0),
+        })
+        .await;
+    assert_eq!(err.code, 2);
 
     // Unknown peer.
     let err = a

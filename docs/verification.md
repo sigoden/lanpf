@@ -15,9 +15,9 @@ noted otherwise.
 | `lanfp-crypto` | Identity persistence, Ed25519 signatures, SPAKE2, pairing records, TLS certificate parsing and key pinning |
 | `lanfp-inventory` | Port classification, native filtering, self-listener exclusion, macOS `netstat` parsing |
 | `lanfp` | Configuration, database, paths, output helpers and CLI utilities |
-| Loopback E2E | Two daemons, pairing (slow code entry, wrong code, unpaired TLS client), forwarding (100 MiB transfer, half-close, 100 concurrent streams), IPC privacy, exit codes, JSON, rule recovery, peer selectors and address updates |
+| Loopback E2E | Two daemons, pairing (slow code entry, wrong code, unpaired TLS client), forwarding (100 MiB transfer, half-close, 100 concurrent streams, automatic listen-port selection), IPC privacy, exit codes, JSON, rule recovery, peer selectors and address updates |
 
-On Linux x86_64 with rustc 1.99.1 the suite reports 55 unit tests (15 + 23 + 14 + 3) and 12
+On Linux x86_64 with rustc 1.99.1 the suite reports 58 unit tests (18 + 23 + 14 + 3) and 15
 loopback E2E tests, all passing. The inventory crate adds two macOS-only tests on that platform.
 The E2E file is `#![cfg(unix)]`, so Windows compiles and runs the unit tests only.
 

@@ -3,16 +3,7 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "lanfp",
-    version,
-    about = "LAN port-forwarding manager",
-    long_about = "lanfp forwards TCP ports from this machine to services on paired devices in the same LAN.\n\n\
-Pairing authorizes the other device to create forwards to any of your listening TCP ports. \
-This version has no revoke or deny command; `lanfp inbound` is read-only. \
-Forwarding listeners only bind 127.0.0.1 and the agent port is the only LAN-facing listener. \
-On Linux/macOS a user-level process cannot listen on ports below 1024; use `--listen` with a high port. Process ownership for other users may be unavailable; ports are still listed and the owner columns show `-`."
-)]
+#[command(name = "lanfp", version, about = "LAN port-forwarding manager")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -138,7 +129,7 @@ pub struct ForwardAddArgs {
     /// Native port on the peer.
     #[arg(value_name = "TARGET_PORT")]
     pub target_port: u16,
-    /// Local loopback port (defaults to the target port).
+    /// Local loopback port (defaults to the target port; 0 picks a free port).
     #[arg(long, value_name = "PORT")]
     pub listen: Option<u16>,
     #[arg(long)]

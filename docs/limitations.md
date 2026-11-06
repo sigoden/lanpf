@@ -57,8 +57,8 @@
 - Rules exist only on the listening side; the serving side is read-only.
 - A single session carries at most 256 streams and opens at most 100 per second; a stream with no
   bytes flowing for 30 minutes is closed.
-- Only one rule may use a given listening port; conflicts are not resolved by picking another
-  port automatically.
+- Only one rule may use a given listening port by default; pass `--listen 0` to let the OS pick
+  a free loopback port instead.
 - Both sides must allow inbound traffic on the agent port, otherwise dialing fails in both
   directions and is retried.
 

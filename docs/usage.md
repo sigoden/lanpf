@@ -65,6 +65,24 @@ text-only, so it has no `--json` output.
 - The `FORWARDED` column of `lanfp remote` shows the local listening port, e.g. `-> 3000`.
 - `@` and whitespace in device names are replaced with `-` at registration time.
 
+## Forwarding
+
+`lanfp forward add <peer> <target_port>` listens on `127.0.0.1:<target_port>` by default. Pass
+`--listen <port>` to choose another local port, or `--listen 0` to let the OS pick a free
+loopback port:
+
+```sh
+$ lanfp forward add mac-mini 3000
+created 3000 -> mac-mini@192.168.8.10:3000 (active)
+
+$ lanfp forward add mac-mini 5000 --listen 0
+created 52714 -> mac-mini@192.168.8.10:5000 (active)
+```
+
+The chosen port is the rule ID: it appears in `lanfp forward list` and in the `FORWARDED`
+column of `lanfp remote`, and it is the argument to `lanfp forward remove`. It is stored with
+the rule, so a daemon restart rebinds the same port instead of picking a new one.
+
 ## Peer address changes
 
 A device is identified by its UUID and pinned key, so a new IP address does not create a new

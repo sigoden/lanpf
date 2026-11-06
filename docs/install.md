@@ -144,7 +144,7 @@ Common issues:
 | `lanfp is already running` | The single-instance lock is working; inspect it with `daemon status` |
 | `lanfp peer add` exits with 6 | The peer is not running `lanfp peer wait`, or a firewall is blocking it |
 | `lanfp remote` exits with 4 | The peer is offline; check the agent port/firewall |
-| `forward add` exits with 5 | The local listening port is in use; pick another with `--listen` |
+| `forward add` exits with 5 | The local listening port is in use; pick another with `--listen`, or use `--listen 0` to let the OS choose |
 | `forward add` exits with 7 | Port `<1024` without root; use a high port |
 | Port owner shows `-` | The current user cannot see that process; the port itself still works |
 
