@@ -1,225 +1,122 @@
-# Usage and Command Reference
+# Usage and command reference
 
-`lanfp` runs as a single binary. `lanfp serve` is the long-running background process; every
-other subcommand is a short-lived client that talks to it over local IPC. Any data command starts
-the background process automatically when needed, so `lanfp daemon start` is optional.
-
-The default output is a table. Every data command supports `--json` (`schema: 2`) for scripts and
-other tools. CLI messages, table headers and JSON fields are in English.
+`lanfp` is one binary. `lanfp serve` runs in the foreground; data commands are short-lived clients that reach the daemon over local IPC and auto-start it when needed. The default output is a table; every data command supports `--json` (`schema: 2`). CLI text and JSON fields are English.
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `lanfp scan [--timeout 3s] [--json]` | Live mDNS scan; list devices and their authorization state |
+| `lanfp scan [--timeout 3s] [--json]` | mDNS scan: devices and their authorization state |
 | `lanfp peer list [--json]` | Devices authorized to access this machine |
-| `lanfp peer grant [PEER]... [--force] [--json]` | Authorize devices; without PEER, scan and pick one |
-| `lanfp peer revoke <PEER>... [--json]` | Revoke authorization and drop existing sessions |
-| `lanfp peer set-address <peer> <ip[:port]> [--json]` | Update the stored address of a known device |
-| `lanfp local [--json]` | Local TCP services (lanfp itself and forwarded listeners are excluded) |
-| `lanfp remote [peer] [--json]` | Exposed ports of servers that authorized this machine |
-| `lanfp forward add <peer> <target_port> [--listen <port>] [--json]` | Create a forward |
+| `lanfp peer grant [PEER]... [--force] [--json]` | Authorize devices; without PEER, pick from a scan (text only) |
+| `lanfp peer revoke <PEER>... [--json]` | Revoke authorization and drop sessions |
+| `lanfp peer set-address <PEER> <ip[:port]> [--json]` | Update a known device's stored address |
+| `lanfp local [--json]` | Local TCP services (lanfp and forwarded listeners excluded) |
+| `lanfp remote [PEER] [--json]` | Exposed ports of servers that authorized this machine |
+| `lanfp forward add <PEER> <TARGET_PORT> [--listen PORT] [--json]` | Create a forward |
 | `lanfp forward list [--json]` | Local rules |
-| `lanfp forward remove <local_port> [--json]` | Remove a rule and close its listener |
-| `lanfp inbound [--json]` | Read-only: who is currently forwarding my ports |
-| `lanfp serve` | Run the long-running process in the foreground (debugging) |
+| `lanfp forward remove <LOCAL_PORT> [--json]` | Remove a rule and close its listener |
+| `lanfp inbound [--json]` | Read-only: who is forwarding this machine's ports |
+| `lanfp serve` | Run the daemon in the foreground (debugging; `RUST_LOG=debug`) |
 | `lanfp daemon start\|stop\|status` | Manage the background instance |
 | `lanfp daemon install\|uninstall` | Register/remove login autostart |
 
-Run `lanfp <command> --help` for the exact options of a command. For a grouped command, use
-`lanfp <group> <command> --help`.
-
-## Command model
-
-Commands are either flat actions (`scan`, `local`, `remote`, `inbound`, `serve`) or a noun group
-with verbs (`peer`, `forward`, `daemon`). A group exists only when one resource has
-several verbs; a one-off action stays a top-level command. `lanfp peer grant` without a selector
-is interactive and text-only; `--json` requires at least one `PEER`.
-
 ## Authorization (one-way)
 
-The machine that exposes a service is the **host**. The machine that uses it is the
-**consumer**.
+The machine that exposes a service is the **host**; the machine that uses it is the **consumer**.
 
-1. On the host, run `lanfp scan` to see devices that are running `lanfp serve`.
-2. On the host, run `lanfp peer grant` (pick from the scan) or pass one or more selectors:
+1. On the host, `lanfp scan` lists devices running `lanfp serve`; authorize one with `lanfp peer grant` (pick from the scan) or pass selectors:
 
    ```sh
-   $ lanfp peer grant
-   discovered devices:
-     1. 5e6f7a8b nix@192.168.8.11        unknown
-   select device [1-1] (q to cancel): 1
-   granted nix@192.168.8.11 [5e6f7a8b]
+   $ lanfp peer grant mac-mini@192.168.8.11
+   granted mac-mini@192.168.8.11 [5e6f7a8b]
    key fingerprint: 1a2b...
    this device may now connect and forward exposed ports on this machine
    ```
 
-   The grant uses a one-way `FPG1` handshake on the agent port. The host stores the consumer
-   with `may_connect`; the consumer stores the host as a known server (`may_dial`) so it can
-   dial back. The consumer is **not** authorized to be accessed by the host.
+2. The consumer can now run `lanfp remote` to see every host that authorized it and that host's exposure view.
 
-3. The consumer can now run `lanfp remote` without a selector and see every host that
-   authorized it, plus that host's exposure view.
-
-`lanfp peer list` shows only devices this machine authorized (`may_connect`). On the consumer,
-the host does not appear in `peer list`; it appears in `remote` and in `scan` as `server`.
-
-- `--force` replaces a stored public key after a device reinstall. Without it, a key change is
-  rejected (exit 9).
-- `lanfp peer revoke <peer>` clears `may_connect`, removes the key from the TLS allow-list, drops
-  the current session, and deletes the peer's inbound references. The consumer's server record
-  remains and is reported offline; a later `peer grant` refreshes it.
-- `lanfp peer set-address` works for any known device, including a server learned by `remote`;
-  this is useful when mDNS is unavailable.
+- The grant uses a one-way `FPG1` handshake on the agent port: the host stores `may_connect`, the consumer stores the host as a known server (`may_dial`) for pinning and dialing. The consumer is not authorized to be accessed by the host.
+- `lanfp peer list` shows only devices this machine authorized. On the consumer, the host appears in `remote` and in `scan` as `server`, not in `peer list`.
+- `--force` replaces a stored key after a device reinstall; without it a key change exits 9.
+- `peer revoke` clears `may_connect`, removes the key from the TLS allow-list, drops the session and deletes inbound references. The consumer's server record stays and reports offline until a later grant.
+- `peer set-address` works for any known device, including a server learned by `remote`; use it when mDNS is unavailable.
 
 ## Exposure
 
-Exposure is machine-wide and configured in `config.toml` via the `agent.expose_ports` whitelist
-(single ports and inclusive ranges). It has two modes:
-
-- **all** (default): the whitelist is empty — every Native listening port is exposed.
-- **whitelist**: the whitelist has entries — only ports covered by it are exposed.
-
-The whitelist takes effect on daemon start and is hot-reloaded: the running daemon picks config
-file changes up within a few seconds and re-advertises the view to its peers automatically.
+Exposure is machine-wide, configured by `agent.expose_ports` in `config.toml` (single ports and inclusive ranges). **all** (default, empty list) exposes every Native listening port; **whitelist** (entries) exposes only covered ports:
 
 ```toml
 [agent]
 expose_ports = ["80", "443", "3000-4000", "8000-8100"]
 ```
 
-An invalid entry (port `0`, a reversed range such as `2000-1000`, non-numeric text) fails the
-daemon at startup or is warned about and ignored during a hot reload.
-
-- A whitelist port does **not** need to be listening. It stays exposed while the service is down
-  and starts forwarding as soon as something binds it.
-- Ranges behave like the ports inside them: any listening port within `[3000, 4000]` is exposed,
-  including ports that were not listening when the config was written. Non-listening in-range
-  ports are listed as whitelisted to the consumer.
-- The agent port is never exposed, even if a range spans it. The agent port and local forwarding
-  listeners are never valid forward targets.
-- The consumer sees the peer's exposure view through `lanfp remote`: in `all` mode it lists every
-  listening port; in `whitelist` mode it lists the listening whitelisted ports and the configured
-  ranges. Ports that are listening but not exposed are not shown.
-- In whitelist mode, `lanfp forward add` accepts a non-listening whitelist target. The rule is
-  created as `target_gone` and becomes `active` automatically when the service starts listening.
-- `lanfp inbound` is unchanged: it lists only ports that are currently being forwarded by other
-  devices (active `inbound_ref` rows).
+- The daemon applies `agent.expose_ports` changes within about 5 seconds and re-advertises the view; an invalid entry fails startup or is ignored on hot reload.
+- Whitelisted ports need not be listening: they stay exposed and start forwarding once a service binds them, and ranges cover any listening port inside them. The agent port is never exposed, even inside a range; forwarding listeners are never valid targets either.
+- On the consumer, `remote` lists every listening port in all mode; in whitelist mode it lists listening whitelisted ports plus the configured ranges, and `forward add` accepts a non-listening target as `target_gone` until it listens.
 
 ## Peer identifiers and selectors
 
-- A device's stable identity is its UUID. Tables show the first 8 lowercase hex characters as
-  `PEER ID` (lengthened if two devices would collide); `lanfp peer list` and every `--json`
-  output carry the full UUID. The UUID survives address and hostname changes, and moving the data
-  directory moves the identity.
-- `PEER` is a view, not an identity: `<name>@<current address>`. It is formatted when a command
-  runs, prefers a fresh mDNS result, and changes when the address or the peer's hostname changes.
-  Use the ID as a persistent key in scripts.
-- Peer selectors accept these forms (a selector matching more than one device exits 2 and lists
-  the candidates):
+- Identity is the UUID; tables show the first 8 lowercase hex as `PEER ID`, lengthened on collision. `--json` carries the full UUID. Moving the data directory moves the identity.
+- `PEER` is a view (`<name>@<current address>`), formatted per command and refreshed from mDNS and authenticated session hellos. Use the ID in scripts.
 
-  | Form | Example | Rule |
-  |---|---|---|
-  | Full UUID | `5e6f7a8b-1c2d-4e3f-8a9b-0c1d2e3f4a5b` | exact |
-  | Short ID prefix | `5e6f7a8b` | at least 4 hex characters, unique |
-  | Device name | `mac-mini` | case-insensitive, unique |
-  | `name@IP` | `mac-mini@192.168.8.23` | name and the **current** address must match; the port is checked only when written |
-  | Bare IP | `192.168.8.23`, `192.168.8.23:5000` | current address, unique |
+| Form | Example | Rule |
+|---|---|---|
+| Full UUID | `5e6f7a8b-1c2d-4e3f-8a9b-0c1d2e3f4a5b` | exact |
+| Short ID prefix | `5e6f7a8b` | at least 4 hex chars, unique |
+| Device name | `mac-mini` | case-insensitive, unique |
+| `name@IP` | `mac-mini@192.168.8.23` | name and current address; port checked only when written |
+| Bare IP | `192.168.8.23`, `192.168.8.23:5000` | current address, unique |
 
-- `lanfp peer grant` with a bare address treats it as a manual target; the address must be an IP.
-  Hostnames must come from `scan` or an existing trust record.
-- The displayed name comes from the remote hostname and is refreshed on the next session
-  establishment (the hello is authenticated by the pinned key). Two devices can share a name;
-  bare-name selection is then ambiguous, so use the ID.
-- The user-visible rule ID is the local listening port. The listener is always `127.0.0.1`, so the
-  address is omitted when a rule is displayed.
-- The `FORWARDED` column of `lanfp remote` shows the local listening port, e.g. `-> 3000`.
-- `@` and whitespace in device names are replaced with `-` at registration time.
+- Ambiguous matches exit 2 and list the candidates. `peer grant` with a bare address is a manual target and must be an IP; hostnames must come from `scan` or a trust record.
+- Names come from the remote hostname, refreshed on session establishment and authenticated by the pinned key; `@` and whitespace become `-` at registration.
+- A rule ID is its local listening port; listeners are always `127.0.0.1`, so the address is omitted.
 
 ## Forwarding
 
-`lanfp forward add <peer> <target_port>` listens on `127.0.0.1:<target_port>` by default. Pass
-`--listen <port>` to choose another local port, or `--listen 0` to let the OS pick a free
-loopback port:
+`lanfp forward add <peer> <target_port>` listens on `127.0.0.1:<target_port>`; `--listen <port>` picks another local port and `--listen 0` lets the OS choose:
 
 ```sh
-$ lanfp forward add mac-mini 3000
-created 3000 -> mac-mini@192.168.8.10:3000 (active)
-
-$ lanfp forward add mac-mini 5000 --listen 0
-created 52714 -> mac-mini@192.168.8.10:5000 (active)
+$ lanfp forward add nix 3000
+created 3000 -> nix@192.168.8.10:3000 (active)
+$ lanfp forward add nix 5000 --listen 0
+created 52714 -> nix@192.168.8.10:5000 (active)
 ```
 
-The target must be in the peer's exposure view. In `mode: all` that means a currently listening
-port; in whitelist mode it may be a configured port that is not listening yet. The chosen listen
-port is the rule ID: it appears in `lanfp forward list` and in the `FORWARDED` column of
-`lanfp remote`, and it is the argument to `lanfp forward remove`. It is stored with the rule, so
-a daemon restart rebinds the same port instead of picking a new one.
-
-## Peer address changes
-
-A device is identified by its UUID and pinned key, so a new IP address does not create a new
-device. The daemon refreshes the stored address from mDNS and from inbound sessions, and
-re-advertises its own addresses within about 60 seconds of an interface or DHCP change. If mDNS
-is blocked, set the address explicitly instead of granting again:
-
-```sh
-$ lanfp peer set-address mac-mini 192.168.8.23
-updated mac-mini@192.168.8.23 [5e6f7a8b] (online)
-```
-
-The port defaults to 47811; use `<ip>:<port>` for a non-default agent port. `--json` prints
-`{schema, peer, id, address, online}`. An established session is left untouched; the new address
-is used for the next dial.
+The target must be in the peer's exposure view. The listen port is the rule ID: it appears in `forward list` and the `FORWARDED` column of `remote`, and is the argument to `forward remove`. It is stored with the rule, so a restart rebinds the same port.
 
 ## JSON output
 
-The `--json` output of every data command is a single object carrying `schema: 2`, for example:
+Every data command's `--json` prints one object with `schema: 2`; errors go to stderr.
 
 ```json
 {
   "schema": 2,
-  "peers": [
-    {
-      "id": "5e6f7a8b-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
-      "name": "mac-mini",
-      "address": "192.168.8.10",
-      "port": 47811,
-      "online": true,
-      "since": 1762300000,
-      "fingerprint": "..."
-    }
-  ]
+  "peers": [{"id": "5e6f7a8b-1c2d-4e3f-8a9b-0c1d2e3f4a5b", "name": "nix", "address": "192.168.8.10", "port": 47811, "online": true, "since": 1762300000, "fingerprint": "..."}]
 }
 ```
 
-With `--json`, stdout contains only JSON; error messages go to stderr. Peer-scoped entries carry
-an `id` (full UUID; `ForwardInfo` calls it `peer_id`), and `lanfp daemon status` carries
-`device_id` and `fingerprint` for this machine. `lanfp remote` returns the peer's exposure
-`mode`, the configured whitelist `ranges` and a `listening` flag per port; it also returns
-`offline_peers` with the IDs of skipped devices.
-
-`lanfp peer grant --json` returns `{schema, granted: [...], failed: [...]}`; a non-empty `failed`
-array makes the command exit non-zero.
+- Peer-scoped entries carry `id` (full UUID; `ForwardInfo` calls it `peer_id`); `daemon status` carries this machine's `device_id` and `fingerprint`.
+- `remote` returns the peer's exposure `mode`, the configured `ranges`, a `listening` flag per port, and `offline_peers`.
+- `peer grant --json` returns `{schema, granted, failed}` and exits non-zero when `failed` is non-empty.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Invalid arguments (including an invalid `agent.expose_ports`) or ambiguous peer selector |
-| 3 | Device / rule not found |
-| 4 | Device not authorized, not a known server, or offline |
-| 5 | Listening port already in use / bind failure |
-| 7 | Insufficient permission (listen on `<1024`) |
-| 8 | Target port is not exposed by the peer |
+| 2 | Invalid arguments (including `agent.expose_ports`) or ambiguous peer selector |
+| 3 | Device or rule not found |
+| 4 | Not authorized, not a known server, or offline |
+| 5 | Listen port in use / bind failure |
+| 7 | Privileged port (`<1024`) |
+| 8 | Target not exposed by the peer |
 | 9 | Authorization failed / key changed / protocol mismatch |
 | 10 | Daemon failed to start or IPC unreachable |
 
 ## Configuration
 
-Linux: `~/.config/lanfp/config.toml`; macOS: `~/Library/Application Support/lanfp/config.toml`;
-Windows: `%APPDATA%\lanfp\config.toml`. The file is generated automatically on first start:
+Paths: Linux `~/.config/lanfp/config.toml`, macOS `~/Library/Application Support/lanfp/config.toml`, Windows `%APPDATA%\lanfp\config.toml`. The file is generated on first start:
 
 ```toml
 [agent]
@@ -238,13 +135,7 @@ scan_timeout_secs = 3
 interval_ms = 2000
 ```
 
-After a change, the background instance hot-reloads within about 5 seconds. `agent.listen` and
-`discovery.mdns` take effect only after `lanfp daemon stop && lanfp daemon start`. An old
-`[pairing]` section is ignored. On an old database, the retired `expose` table is dropped
-automatically; exposure is config-owned now.
-
-Set `LANFP_HOME=/some/dir` to collect all configuration, data, identity and log paths under that
-directory for tests or portable runs.
+Most settings hot-reload within about 5 seconds; `agent.listen` and `discovery.mdns` take effect after `lanfp daemon stop && lanfp daemon start`. Set `LANFP_HOME=/some/dir` to keep config, data, identity and logs in one tree.
 
 ## Data and logs
 
@@ -254,30 +145,5 @@ directory for tests or portable runs.
 | macOS | `~/Library/Application Support/lanfp/config.toml` | `lanfp.db` in the same directory | `logs/lanfp.log` in the same directory |
 | Windows | `%APPDATA%\lanfp\config.toml` | `%LOCALAPPDATA%\lanfp\lanfp.db` | `logs\lanfp.log` in the same directory |
 
-- Identity keys: `identity.key` (0600) and `identity.crt` in the data directory.
-- IPC: Linux `$XDG_RUNTIME_DIR/lanfp/ctl.sock` (fallback `/tmp/lanfp-<uid>/ctl.sock`), mode 0600;
-  macOS uses `$TMPDIR`; Windows uses `\\.\pipe\lanfp-<username>-<hash>`.
-- Logs rotate once at 5 MiB (`lanfp.log.1`) when the background instance is auto-spawned.
-
-## Background process
-
-```sh
-lanfp daemon start       # start it explicitly
-lanfp daemon status      # PID, uptime, agent address, allowed/servers, IPC and log path
-lanfp daemon stop        # stop it
-```
-
-`lanfp serve` runs the daemon in the foreground and logs to stderr; use it for debugging with
-`RUST_LOG=debug`. Any other command auto-spawns the daemon when needed. Register login autostart
-with `lanfp daemon install`; remove it with `lanfp daemon uninstall`.
-
-The single-instance lock applies per `LANFP_HOME`/user runtime directory. Do not run multiple
-instances for normal use.
-
-## See also
-
-- [Installation and operations](install.md): releases, builds, firewall, troubleshooting,
-  upgrades and uninstall.
-- [Security model](security.md): trust boundaries, authorization, exposure, transport and
-  accepted risks.
-- [Known limitations](limitations.md): platform behaviour and current gaps.
+- Identity: `identity.key` (0600) and `identity.crt` in the data directory, which moves the identity; IPC is `$XDG_RUNTIME_DIR/lanfp/ctl.sock` on Linux (fallback `/tmp/lanfp-<uid>/ctl.sock`, mode 0600), `$TMPDIR/lanfp/ctl.sock` on macOS, and `\\.\pipe\lanfp-<username>-<hash>` on Windows.
+- Logs rotate once at 5 MiB (`lanfp.log.1`) when the CLI spawns the daemon.
