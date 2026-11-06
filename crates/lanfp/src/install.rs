@@ -26,20 +26,7 @@ pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
         if let Some(parent) = unit_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut unit = String::from(
-            "[Unit]\n\
-             Description=lanfp LAN port forwarding agent\n\
-             After=network-online.target\n\
-             Wants=network-online.target\n\n\
-             [Service]\n\
-             Type=simple\n",
-        );
-        unit.push_str(&format!("ExecStart={}\n", quote_exec(&exe)));
-        unit.push_str("Restart=on-failure\nRestartSec=2\nEnvironment=RUST_LOG=info\n");
-        if let Some(home) = &home_env {
-            unit.push_str(&format!("Environment=LANFP_HOME={home}\n"));
-        }
-        unit.push_str("\n[Install]\nWantedBy=default.target\n");
+        let unit = systemd_unit_contents(&exe, home_env.as_deref());
         std::fs::write(&unit_path, unit)
             .with_context(|| format!("write {}", unit_path.display()))?;
         run("systemctl", &["--user", "daemon-reload"])?;
@@ -54,16 +41,7 @@ pub fn install(_paths: &Paths) -> Result<InstallOutcome> {
     if let Some(parent) = desktop_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut desktop = String::from(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=lanfp\n\
-         Comment=LAN port forwarding agent\n\
-         Terminal=false\n\
-         Hidden=false\n\
-         X-GNOME-Autostart-enabled=true\n",
-    );
-    desktop.push_str(&format!("Exec={}\n", quote_exec(&exe)));
+    let desktop = desktop_entry_contents(&exe);
     std::fs::write(&desktop_path, desktop)
         .with_context(|| format!("write {}", desktop_path.display()))?;
     Ok(InstallOutcome {
@@ -93,6 +71,43 @@ pub fn uninstall(paths: &Paths) -> Result<String> {
         return Ok(desktop_path.display().to_string());
     }
     bail!("no lanfp autostart entry is installed")
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_unit_contents(exe: &Path, home_env: Option<&str>) -> String {
+    let mut unit = String::from(
+        "[Unit]\n\
+         Description=lanfp LAN port forwarding agent\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\n\
+         [Service]\n\
+         Type=simple\n",
+    );
+    // Bare `lanfp` prints help and exits 2, so the unit must pass the daemon
+    // subcommand explicitly.
+    unit.push_str(&format!("ExecStart={} serve\n", quote_exec(exe)));
+    unit.push_str("Restart=on-failure\nRestartSec=2\nEnvironment=RUST_LOG=info\n");
+    if let Some(home) = home_env {
+        unit.push_str(&format!("Environment=LANFP_HOME={home}\n"));
+    }
+    unit.push_str("\n[Install]\nWantedBy=default.target\n");
+    unit
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_entry_contents(exe: &Path) -> String {
+    let mut desktop = String::from(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=lanfp\n\
+         Comment=LAN port forwarding agent\n\
+         Terminal=false\n\
+         Hidden=false\n\
+         X-GNOME-Autostart-enabled=true\n",
+    );
+    // Same as the systemd unit: the desktop entry starts the daemon itself.
+    desktop.push_str(&format!("Exec={} serve\n", quote_exec(exe)));
+    desktop
 }
 
 #[cfg(target_os = "linux")]
@@ -305,4 +320,40 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         bail!("{program} {} failed: {stderr}", args.join(" "));
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_starts_serve() {
+        let exe = Path::new("/opt/lanfp/bin/lanfp");
+        let unit = systemd_unit_contents(exe, None);
+        assert!(
+            unit.contains("ExecStart=/opt/lanfp/bin/lanfp serve\n"),
+            "unit did not start the daemon: {unit}"
+        );
+    }
+
+    #[test]
+    fn systemd_unit_quotes_executable_with_spaces() {
+        let exe = Path::new("/opt/lan fp/lanfp");
+        let unit = systemd_unit_contents(exe, Some("/home/me/lanfp data"));
+        assert!(
+            unit.contains("ExecStart=\"/opt/lan fp/lanfp\" serve\n"),
+            "unit did not quote the executable: {unit}"
+        );
+        assert!(unit.contains("Environment=LANFP_HOME=/home/me/lanfp data\n"));
+    }
+
+    #[test]
+    fn desktop_entry_starts_serve() {
+        let exe = Path::new("/usr/local/bin/lanfp");
+        let desktop = desktop_entry_contents(exe);
+        assert!(
+            desktop.contains("Exec=/usr/local/bin/lanfp serve\n"),
+            "desktop entry did not start the daemon: {desktop}"
+        );
+    }
 }
