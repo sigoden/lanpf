@@ -57,6 +57,7 @@ On macOS, `daemon install` from a plain SSH session may register the plist but a
 - Allow inbound TCP on the agent port (default 47811); mDNS uses UDP 5353.
 - If mDNS is blocked, authorize manually with `lanfp peer grant <ip>[:port]`.
 - macOS may prompt to allow incoming connections and, on 15+, for "Local Network" access; Windows Firewall prompts on first listen (allow private networks).
+- A daemon started from SSH or login autostart cannot show that prompt. On a Public network profile Windows blocks inbound by default, so add the inbound TCP rule for 47811 (and UDP 5353 if you rely on discovery) yourself, for example `netsh advfirewall firewall add rule name="lanfp" dir=in action=allow protocol=TCP localport=47811` from an elevated prompt.
 - The agent port is `[agent] listen` in `config.toml`, default `0.0.0.0:47811`; restart after changing it. Forwarding listeners bind `127.0.0.1` only, so no firewall opening is needed.
 
 ## Logs and troubleshooting
