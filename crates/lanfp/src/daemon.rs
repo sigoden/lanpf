@@ -133,6 +133,7 @@ impl Daemon {
             device_id,
             identity.public_key_bytes(),
             config.discovery.mdns,
+            agent_addr.ip(),
         );
         let expose_ranges = config.agent.expose_ranges()?;
         let expose = Arc::new(ExposeManager::load(expose_ranges));
@@ -709,6 +710,19 @@ impl Daemon {
             })
     }
 
+    /// Addresses to try when dialing a peer: a fresh mDNS hint first, then the
+    /// address stored in the database. Discovery is only a hint, so a stale or
+    /// unreachable mDNS result must not make a reachable peer undialable.
+    pub fn peer_dial_candidates(&self, peer: &PeerRecord) -> Vec<SocketAddr> {
+        let fresh = self.discovery.fresh_addr(peer.device_id, DISCOVERY_FRESH);
+        let stored = peer
+            .last_addr
+            .as_deref()
+            .and_then(|raw| PeerAddr::parse(raw).ok())
+            .and_then(|parsed| parsed.socket_addr());
+        dial_candidates(fresh, stored)
+    }
+
     /// `<name>@<current address>`, formatted when a list is printed. This is a
     /// view, not an identity: the stable identity is always [`PeerRecord::device_id`].
     pub fn display_peer(&self, peer: &PeerRecord) -> String {
@@ -1241,4 +1255,45 @@ pub fn low_port_error(port: u16) -> Option<IpcError> {
         let _ = port;
     }
     None
+}
+
+/// Try the fresh mDNS hint first, then the last address that worked.
+fn dial_candidates(fresh: Option<SocketAddr>, stored: Option<SocketAddr>) -> Vec<SocketAddr> {
+    let mut out = Vec::with_capacity(2);
+    for addr in [fresh, stored].into_iter().flatten() {
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn v4(port: u16) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::new(192, 168, 8, 8), port))
+    }
+
+    #[test]
+    fn dial_candidates_put_the_fresh_hint_first() {
+        let fresh = SocketAddr::from((Ipv4Addr::new(192, 168, 8, 9), 47811));
+        assert_eq!(
+            dial_candidates(Some(fresh), Some(v4(47811))),
+            vec![fresh, v4(47811)]
+        );
+    }
+
+    #[test]
+    fn dial_candidates_deduplicate_and_tolerate_missing_addresses() {
+        assert_eq!(
+            dial_candidates(Some(v4(47811)), Some(v4(47811))),
+            vec![v4(47811)]
+        );
+        assert_eq!(dial_candidates(None, Some(v4(47811))), vec![v4(47811)]);
+        assert_eq!(dial_candidates(Some(v4(47811)), None), vec![v4(47811)]);
+        assert!(dial_candidates(None, None).is_empty());
+    }
 }

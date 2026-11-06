@@ -233,17 +233,31 @@ impl Daemon {
     pub async fn dial_peer(self: &Arc<Self>, peer: &PeerRecord) -> Result<()> {
         // A fresh mDNS result wins over the stored address, so DHCP changes
         // and network switches are picked up without restarting the daemon.
-        let addr = self
-            .current_peer_addr(peer)
-            .context("peer has no known address")?;
+        // Discovery is a hint: if the fresh address is unreachable, fall back
+        // to the last address that worked instead of declaring the peer down.
+        let candidates = self.peer_dial_candidates(peer);
+        if candidates.is_empty() {
+            bail!("peer has no known address");
+        }
+        let mut failures = Vec::new();
+        let mut connected = None;
+        for addr in &candidates {
+            match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                Ok(Ok(tcp)) => {
+                    connected = Some((*addr, tcp));
+                    break;
+                }
+                Ok(Err(err)) => failures.push(format!("connect {addr}: {err}")),
+                Err(_) => failures.push(format!("connect {addr}: timeout")),
+            }
+        }
+        let Some((addr, tcp)) = connected else {
+            bail!("{}", failures.join("; "));
+        };
+        tcp.set_nodelay(true).ok();
         let pubkey = peer.pubkey_array().context("peer public key is invalid")?;
         let config = lanfp_crypto::client_config(&self.identity, pubkey)?;
         let connector = tokio_rustls::TlsConnector::from(config);
-        let tcp = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
-            .await
-            .context("connect timeout")?
-            .with_context(|| format!("connect {addr}"))?;
-        tcp.set_nodelay(true).ok();
         let server_name =
             tokio_rustls::rustls::pki_types::ServerName::try_from(TLS_SERVER_NAME.to_string())
                 .context("invalid TLS server name")?;

@@ -64,6 +64,9 @@ pub struct Discovery {
     daemon: Mutex<Option<ServiceDaemon>>,
     self_uuid: Uuid,
     self_pubkey: [u8; 32],
+    /// Address the agent listener is bound to; mDNS must only advertise
+    /// addresses that this socket can actually answer on.
+    agent_ip: IpAddr,
     /// What is currently advertised, used to detect address changes.
     advertised: Mutex<Option<Advertised>>,
     stop: Mutex<bool>,
@@ -71,7 +74,12 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    pub fn new(self_uuid: Uuid, self_pubkey: [u8; 32], enabled: bool) -> Arc<Self> {
+    pub fn new(
+        self_uuid: Uuid,
+        self_pubkey: [u8; 32],
+        enabled: bool,
+        agent_ip: IpAddr,
+    ) -> Arc<Self> {
         Arc::new(Self {
             enabled,
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -79,6 +87,7 @@ impl Discovery {
             daemon: Mutex::new(None),
             self_uuid,
             self_pubkey,
+            agent_ip,
             advertised: Mutex::new(None),
             stop: Mutex::new(false),
             stop_cv: Condvar::new(),
@@ -98,7 +107,7 @@ impl Discovery {
         }
         let daemon = ServiceDaemon::new().context("start mDNS daemon")?;
 
-        let addresses = local_advertise_addresses();
+        let addresses = local_advertise_addresses(self.agent_ip);
         if addresses.is_empty() {
             tracing::warn!(
                 "no non-loopback address found; mDNS advertising will start once one appears"
@@ -183,7 +192,7 @@ impl Discovery {
         if *self.stop.lock().unwrap() {
             return;
         }
-        let addrs = local_advertise_addresses();
+        let addrs = local_advertise_addresses(self.agent_ip);
         {
             let advertised = self.advertised.lock().unwrap();
             let unchanged = match advertised.as_ref() {
@@ -380,16 +389,35 @@ fn apply_event(
                 return;
             }
             let fullname = info.get_fullname().to_string();
-            let peer = DiscoveredPeer {
-                uuid,
-                name: sanitize_device_name(&name),
-                addresses,
-                port,
-                pubkey,
-                version,
-                last_seen: Instant::now(),
-            };
-            cache.write().unwrap().insert(uuid, peer);
+            let mut cache = cache.write().unwrap();
+            match cache.get_mut(&uuid) {
+                Some(existing) => {
+                    // A resolver may report the A and AAAA records in separate
+                    // events; merge instead of replacing so a later IPv6-only
+                    // event does not discard the reachable IPv4 address.
+                    merge_addresses(&mut existing.addresses, addresses);
+                    existing.name = sanitize_device_name(&name);
+                    existing.port = port;
+                    existing.pubkey = pubkey;
+                    existing.version = version;
+                    existing.last_seen = Instant::now();
+                }
+                None => {
+                    cache.insert(
+                        uuid,
+                        DiscoveredPeer {
+                            uuid,
+                            name: sanitize_device_name(&name),
+                            addresses,
+                            port,
+                            pubkey,
+                            version,
+                            last_seen: Instant::now(),
+                        },
+                    );
+                }
+            }
+            drop(cache);
             index.write().unwrap().insert(fullname, uuid);
         }
         ServiceEvent::ServiceRemoved(_ty, fullname) => {
@@ -406,7 +434,7 @@ fn parse_pubkey(raw: Option<&str>) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes).ok()
 }
 
-fn local_advertise_addresses() -> Vec<IpAddr> {
+fn local_advertise_addresses(agent_ip: IpAddr) -> Vec<IpAddr> {
     let Ok(interfaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
     };
@@ -419,14 +447,87 @@ fn local_advertise_addresses() -> Vec<IpAddr> {
             IpAddr::V4(_) => true,
         })
         .collect();
+    out = filter_advertise_addresses(out, agent_ip);
     out.sort();
     out.dedup();
     out
 }
 
+/// Keep only addresses the agent listener can answer on. Binding `0.0.0.0`
+/// opens an IPv4-only socket, so advertising AAAA records would send peers to
+/// an address that cannot connect; a specific bind address advertises itself.
+fn filter_advertise_addresses(addrs: Vec<IpAddr>, agent_ip: IpAddr) -> Vec<IpAddr> {
+    match agent_ip {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            addrs.into_iter().filter(IpAddr::is_ipv4).collect()
+        }
+        IpAddr::V4(ip) => vec![IpAddr::V4(ip)],
+        IpAddr::V6(ip) if ip.is_unspecified() => addrs,
+        IpAddr::V6(ip) => vec![IpAddr::V6(ip)],
+    }
+}
+
+fn merge_addresses(existing: &mut Vec<IpAddr>, incoming: Vec<IpAddr>) {
+    for addr in incoming {
+        if !existing.contains(&addr) {
+            existing.push(addr);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn ipv4_wildcard_advertises_ipv4_only() {
+        let addrs = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 168, 8, 14)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ];
+        let kept = filter_advertise_addresses(addrs, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(kept, vec![IpAddr::V4(Ipv4Addr::new(192, 168, 8, 14))]);
+    }
+
+    #[test]
+    fn specific_bind_advertises_exactly_that_address() {
+        let addrs = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 168, 8, 14)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+        let kept = filter_advertise_addresses(addrs, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(kept, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))]);
+    }
+
+    #[test]
+    fn ipv6_wildcard_keeps_both_families() {
+        let addrs = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 168, 8, 14)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ];
+        let kept = filter_advertise_addresses(addrs.clone(), IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(kept, addrs);
+    }
+
+    #[test]
+    fn merge_keeps_earlier_families_without_duplicates() {
+        let mut existing = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 8, 8))];
+        merge_addresses(
+            &mut existing,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 8, 8)),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
+        );
+        assert_eq!(
+            existing,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 8, 8)),
+                IpAddr::V6(Ipv6Addr::LOCALHOST)
+            ]
+        );
+    }
 
     #[test]
     fn parses_only_thirty_two_byte_hex_keys() {
