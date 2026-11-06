@@ -243,7 +243,9 @@ impl Daemon {
 }
 
 async fn map_bind_error(daemon: &Daemon, port: u16, err: &std::io::Error) -> IpcError {
-    if err.kind() == std::io::ErrorKind::PermissionDenied {
+    // Windows returns WSAEACCES for a port that another socket reserves, not
+    // only for privileged ports, so only suggest a high port when one is needed.
+    if err.kind() == std::io::ErrorKind::PermissionDenied && port < 1024 {
         return ipc_err(
             ExitCode::Permission,
             format!("permission denied binding 127.0.0.1:{port}; use a port >= 1024"),
