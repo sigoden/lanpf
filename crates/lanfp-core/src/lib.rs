@@ -16,11 +16,12 @@ pub use peer::{
     PeerParseError,
 };
 
-/// Protocol version carried by `Hello` and the pairing handshake.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Protocol version carried by `Hello`, the grant handshake and the
+/// exposure/inventory control messages.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Version of the `--json` output envelope (`schema` field).
-pub const JSON_SCHEMA: u32 = 1;
+pub const JSON_SCHEMA: u32 = 2;
 
 /// Default agent port. Also the port omitted from `PEER` display.
 pub const DEFAULT_AGENT_PORT: u16 = 47811;
@@ -28,9 +29,13 @@ pub const DEFAULT_AGENT_PORT: u16 = 47811;
 /// mDNS service type.
 pub const MDNS_SERVICE_TYPE: &str = "_lanfp._tcp.local.";
 
-/// Magic prefix for the pairing channel (sent right after connecting to the
-/// agent port).
-pub const PAIR_MAGIC: &[u8; 4] = b"FPP1";
+/// Magic prefix for the one-way grant channel (sent right after connecting to
+/// the agent port).
+pub const GRANT_MAGIC: &[u8; 4] = b"FPG1";
+
+/// Magic prefix for the read-only identity query used by a consumer that wants
+/// to pin a server it was granted access to.
+pub const IDENTITY_MAGIC: &[u8; 4] = b"FPID";
 
 /// Magic prefix of the 25-byte data-stream header.
 pub const DATA_MAGIC: &[u8; 4] = b"LAND";

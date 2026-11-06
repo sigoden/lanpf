@@ -8,8 +8,8 @@ use anyhow::{bail, Context as _, Result};
 use futures::io::{AsyncRead, AsyncWrite};
 use lanfp_core::frame::{read_json, write_json};
 use lanfp_core::peer::PeerAddr;
-use lanfp_core::protocol::{ControlMessage, DataHeader, PortInfo, RuleState};
-use lanfp_core::{build_id, DATA_HEADER_LEN, PAIR_MAGIC, PROTOCOL_VERSION};
+use lanfp_core::protocol::{ControlMessage, DataHeader, ExposureView, PortInfo, RuleState};
+use lanfp_core::{build_id, DATA_HEADER_LEN, GRANT_MAGIC, IDENTITY_MAGIC, PROTOCOL_VERSION};
 use lanfp_crypto::tls::ed25519_pubkey_from_cert;
 use lanfp_crypto::TLS_SERVER_NAME;
 use std::collections::{HashMap, HashSet};
@@ -107,7 +107,9 @@ pub struct SessionHandle {
     pub peer_name: String,
     pub dialer_uuid: Uuid,
     inventory: RwLock<Vec<PortInfo>>,
+    exposure: RwLock<ExposureView>,
     inventory_received: AtomicBool,
+    exposure_received: AtomicBool,
     control_tx: mpsc::Sender<ControlMessage>,
     open_tx: mpsc::Sender<OpenRequest>,
     limiter: Arc<StreamLimiter>,
@@ -118,6 +120,14 @@ pub struct SessionHandle {
 impl SessionHandle {
     pub fn native_ports(&self) -> Vec<PortInfo> {
         self.inventory.read().unwrap().clone()
+    }
+
+    pub fn exposure(&self) -> ExposureView {
+        self.exposure.read().unwrap().clone()
+    }
+
+    pub fn exposure_received(&self) -> bool {
+        self.exposure_received.load(Ordering::Relaxed)
     }
 
     pub fn inventory_received(&self) -> bool {
@@ -348,7 +358,9 @@ impl Daemon {
             peer_name: peer.name.clone(),
             dialer_uuid: if is_dialer { self.device_id } else { peer_id },
             inventory: RwLock::new(Vec::new()),
+            exposure: RwLock::new(ExposureView::default()),
             inventory_received: AtomicBool::new(false),
+            exposure_received: AtomicBool::new(false),
             control_tx,
             open_tx,
             limiter: StreamLimiter::new(self.config().agent.max_streams),
@@ -421,10 +433,17 @@ impl Daemon {
             }
         });
 
+        let exposure = self.exposure_view();
         handle
             .send(ControlMessage::Inventory {
                 seq: self.inventory.seq(),
-                ports: self.inventory.native(),
+                ports: self.exposed_inventory(),
+            })
+            .await;
+        handle
+            .send(ControlMessage::Exposure {
+                mode: exposure.mode,
+                ports: exposure.ports,
             })
             .await;
         let rules = rules_for_peer_snapshot(self, peer_id);
@@ -508,6 +527,10 @@ impl Daemon {
                 let _ = self.db.touch_peer_inbound(handle.peer_id, now);
                 self.recompute_rules_for_peer(handle.peer_id).await;
             }
+            ControlMessage::Exposure { mode, ports } => {
+                *handle.exposure.write().unwrap() = ExposureView { mode, ports };
+                handle.exposure_received.store(true, Ordering::Relaxed);
+            }
             ControlMessage::RuleUpsert {
                 rule_id,
                 target_port,
@@ -515,6 +538,27 @@ impl Daemon {
                 state,
             } => {
                 let _ = state;
+                let exposed = self.expose.is_exposed(target_port);
+                let native = if self.inventory.is_native(target_port) {
+                    true
+                } else {
+                    self.inventory.refresh().await.is_ok() && self.inventory.is_native(target_port)
+                };
+                if !exposed || !native {
+                    let reason = if !exposed {
+                        format!("port {target_port} is not exposed by this device")
+                    } else {
+                        format!("target port {target_port} is not listening")
+                    };
+                    handle
+                        .send(ControlMessage::RuleRejected {
+                            rule_id,
+                            reason: reason.clone(),
+                        })
+                        .await;
+                    let _ = reason;
+                    return Ok(());
+                }
                 let rec = inbound_record(
                     handle.peer_id,
                     rule_id,
@@ -588,6 +632,20 @@ impl Daemon {
                 return;
             }
         };
+        if !self.expose.is_exposed(header.target_port) {
+            tracing::warn!(
+                "peer {} requested non-exposed port {}",
+                handle.peer_name,
+                header.target_port
+            );
+            handle
+                .send(ControlMessage::RuleRejected {
+                    rule_id: header.rule_id,
+                    reason: format!("port {} is not exposed by this device", header.target_port),
+                })
+                .await;
+            return;
+        }
         if !self.inventory.is_native(header.target_port)
             && (self.inventory.refresh().await.is_err()
                 || !self.inventory.is_native(header.target_port))
@@ -855,7 +913,10 @@ impl Daemon {
             let peer = self
                 .db
                 .peer_by_pubkey(&pubkey)?
-                .context("TLS peer is not a paired device")?;
+                .context("TLS peer is not authorized to connect")?;
+            if !peer.may_connect {
+                bail!("TLS peer is not authorized to connect");
+            }
             self.establish_session(tls, peer, false, Some(addr)).await?;
             return Ok(());
         }
@@ -863,11 +924,12 @@ impl Daemon {
         let mut magic = [0u8; 4];
         tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut magic))
             .await
-            .context("timed out reading pairing magic")??;
-        if &magic != PAIR_MAGIC {
-            bail!("unknown protocol on agent port from {addr}");
+            .context("timed out reading agent-port magic")??;
+        match &magic {
+            m if m == GRANT_MAGIC => self.handle_grant_connection(stream, addr).await,
+            m if m == IDENTITY_MAGIC => self.handle_identity_connection(stream, addr).await,
+            _ => bail!("unknown protocol on agent port from {addr}"),
         }
-        self.handle_pair_connection(stream, addr).await
     }
 }
 
@@ -878,7 +940,7 @@ pub async fn session_supervisor(daemon: Arc<Daemon>) {
         tokio::select! {
             _ = daemon.shutdown.cancelled() => break,
             _ = ticker.tick() => {
-                let peers = match daemon.db.list_peers() {
+                let peers = match daemon.db.list_dialable() {
                     Ok(peers) => peers,
                     Err(err) => {
                         tracing::warn!("cannot list peers: {err:#}");
@@ -904,7 +966,11 @@ pub async fn session_supervisor(daemon: Arc<Daemon>) {
                             first: now,
                             warned: false,
                         });
-                        let local_is_dialer = forced || daemon.device_id < peer.device_id;
+                        // A pure consumer must always dial: the exposing side
+                        // only has may_connect for it and will never dial back.
+                        // Mutual trust keeps the UUID-based election.
+                        let local_is_dialer =
+                            forced || !peer.may_connect || daemon.device_id < peer.device_id;
                         let fallback = now.duration_since(entry.first) > Duration::from_secs(30);
                         if (!local_is_dialer && !fallback) || now < entry.next {
                             false
@@ -1035,7 +1101,8 @@ where
     }
 }
 
-/// Used by `forward add` to validate a peer's native inventory.
-pub fn peer_has_port(handle: &SessionHandle, port: u16) -> bool {
-    handle.native_ports().iter().any(|p| p.port == port)
+/// Used by `forward add` to validate a peer's exposure view. Whitelist
+/// entries count even while they are not listening.
+pub fn peer_exposes_port(handle: &SessionHandle, port: u16) -> bool {
+    handle.exposure().ports.iter().any(|p| p.port == port)
 }

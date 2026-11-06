@@ -1,11 +1,11 @@
 //! mDNS discovery: advertise `_lanfp._tcp.local.` and maintain a cache of
 //! discovered devices.
 //!
-//! If mDNS is blocked by a firewall, manual `lanfp peer add <ip>[:port]` remains
+//! If mDNS is blocked by a firewall, manual `lanfp peer grant <ip>[:port]` remains
 //! the primary fallback.
 
 use anyhow::{Context, Result};
-use lanfp_core::{sanitize_device_name, DEFAULT_AGENT_PORT, MDNS_SERVICE_TYPE};
+use lanfp_core::{sanitize_device_name, DEFAULT_AGENT_PORT, MDNS_SERVICE_TYPE, PROTOCOL_VERSION};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -24,6 +24,10 @@ pub struct DiscoveredPeer {
     pub name: String,
     pub addresses: Vec<IpAddr>,
     pub port: u16,
+    /// Public key published in the mDNS TXT record. Unauthenticated, but used
+    /// to bind a live grant/identity proof to the advertised device.
+    pub pubkey: Option<[u8; 32]>,
+    pub version: u16,
     pub last_seen: Instant,
 }
 
@@ -59,6 +63,7 @@ pub struct Discovery {
     fullname_index: Arc<RwLock<HashMap<String, Uuid>>>,
     daemon: Mutex<Option<ServiceDaemon>>,
     self_uuid: Uuid,
+    self_pubkey: [u8; 32],
     /// What is currently advertised, used to detect address changes.
     advertised: Mutex<Option<Advertised>>,
     stop: Mutex<bool>,
@@ -66,13 +71,14 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    pub fn new(self_uuid: Uuid, enabled: bool) -> Arc<Self> {
+    pub fn new(self_uuid: Uuid, self_pubkey: [u8; 32], enabled: bool) -> Arc<Self> {
         Arc::new(Self {
             enabled,
             cache: Arc::new(RwLock::new(HashMap::new())),
             fullname_index: Arc::new(RwLock::new(HashMap::new())),
             daemon: Mutex::new(None),
             self_uuid,
+            self_pubkey,
             advertised: Mutex::new(None),
             stop: Mutex::new(false),
             stop_cv: Condvar::new(),
@@ -243,11 +249,14 @@ impl Discovery {
         );
         let id = self.self_uuid.to_string();
         let port = agent_port.to_string();
+        let version = PROTOCOL_VERSION.to_string();
+        let pubkey = hex::encode(self.self_pubkey);
         let props = [
             ("id", id.as_str()),
             ("nm", name),
-            ("v", "1"),
+            ("v", version.as_str()),
             ("p", port.as_str()),
+            ("pk", pubkey.as_str()),
         ];
         ServiceInfo::new(
             MDNS_SERVICE_TYPE,
@@ -357,6 +366,11 @@ fn apply_event(
                 .get_property_val_str("p")
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(DEFAULT_AGENT_PORT);
+            let version = info
+                .get_property_val_str("v")
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(1);
+            let pubkey = parse_pubkey(info.get_property_val_str("pk"));
             let addresses: Vec<IpAddr> = info
                 .get_addresses()
                 .iter()
@@ -371,6 +385,8 @@ fn apply_event(
                 name: sanitize_device_name(&name),
                 addresses,
                 port,
+                pubkey,
+                version,
                 last_seen: Instant::now(),
             };
             cache.write().unwrap().insert(uuid, peer);
@@ -383,6 +399,11 @@ fn apply_event(
         }
         _ => {}
     }
+}
+
+fn parse_pubkey(raw: Option<&str>) -> Option<[u8; 32]> {
+    let bytes = hex::decode(raw?).ok()?;
+    <[u8; 32]>::try_from(bytes).ok()
 }
 
 fn local_advertise_addresses() -> Vec<IpAddr> {
@@ -401,4 +422,18 @@ fn local_advertise_addresses() -> Vec<IpAddr> {
     out.sort();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_thirty_two_byte_hex_keys() {
+        let key = [7u8; 32];
+        assert_eq!(parse_pubkey(Some(&hex::encode(key))), Some(key));
+        assert_eq!(parse_pubkey(Some("not-hex")), None);
+        assert_eq!(parse_pubkey(Some("00")), None);
+        assert_eq!(parse_pubkey(None), None);
+    }
 }

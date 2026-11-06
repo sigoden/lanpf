@@ -1,6 +1,6 @@
 //! Implementation of the CLI subcommands (client side).
 
-use crate::cli::{Commands, DaemonCmd, ForwardCmd, PeerCmd};
+use crate::cli::{Commands, DaemonCmd, ExposeCmd, ForwardCmd, PeerCmd};
 use crate::client::{self, CliError};
 use crate::config::{parse_duration, Config};
 use crate::daemon;
@@ -10,10 +10,10 @@ use crate::paths::Paths;
 use crate::util::{format_uptime, print_json, relative_time};
 use lanfp_core::error::ExitCode;
 use lanfp_core::ipc::*;
-use lanfp_core::{short_id, short_ids};
+use lanfp_core::protocol::ExposeMode;
+use lanfp_core::{short_id, short_ids, PROTOCOL_VERSION};
 use serde::de::DeserializeOwned;
 use std::io::{IsTerminal, Write};
-use std::time::Duration;
 
 fn decode<T: DeserializeOwned>(value: Option<serde_json::Value>) -> Result<T, CliError> {
     let value = value.unwrap_or(serde_json::Value::Null);
@@ -52,10 +52,15 @@ pub async fn dispatch(command: Commands) -> Result<(), CliError> {
     match command {
         Commands::Scan(args) => scan(args).await,
         Commands::Peer(cmd) => match cmd {
-            PeerCmd::Add(args) => peer_add(args).await,
-            PeerCmd::Wait(args) => peer_wait(args).await,
             PeerCmd::List(args) => peer_list(args).await,
+            PeerCmd::Grant(args) => peer_grant(args).await,
+            PeerCmd::Revoke(args) => peer_revoke(args).await,
             PeerCmd::SetAddress(args) => peer_set_address(args).await,
+        },
+        Commands::Expose(cmd) => match cmd {
+            ExposeCmd::List(args) => expose_list(args).await,
+            ExposeCmd::Add(args) => expose_add(args).await,
+            ExposeCmd::Remove(args) => expose_remove(args).await,
         },
         Commands::Local(args) => local(args).await,
         Commands::Remote(args) => remote(args).await,
@@ -76,6 +81,18 @@ pub async fn dispatch(command: Commands) -> Result<(), CliError> {
     }
 }
 
+fn scan_state(peer: &ScanPeer) -> &'static str {
+    if peer.version != PROTOCOL_VERSION {
+        "incompatible"
+    } else if peer.authorized {
+        "authorized"
+    } else if peer.known {
+        "server"
+    } else {
+        "unknown"
+    }
+}
+
 async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
     let paths = paths()?;
     let timeout_ms = match args.timeout.as_deref() {
@@ -91,7 +108,9 @@ async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
     }
     if result.peers.is_empty() {
         println!("no devices discovered");
-        eprintln!("hint: if mDNS is blocked, pair manually with `lanfp peer add <ip>[:port]`");
+        eprintln!(
+            "hint: start `lanfp serve` on the other device, or use `lanfp peer grant <ip>[:port]`"
+        );
         return Ok(());
     }
     let ids: Vec<_> = result.peers.iter().map(|p| p.id).collect();
@@ -105,11 +124,291 @@ async fn scan(args: crate::cli::ScanArgs) -> Result<(), CliError> {
                 id,
                 p.peer.clone(),
                 p.port.to_string(),
-                if p.paired { "paired" } else { "unpaired" }.to_string(),
+                p.version.to_string(),
+                scan_state(p).to_string(),
             ]
         })
         .collect();
-    print_table(&["PEER ID", "PEER", "PORT", "STATE"], &rows);
+    print_table(&["PEER ID", "PEER", "PORT", "VERSION", "STATE"], &rows);
+    Ok(())
+}
+
+async fn peer_grant(args: crate::cli::PeerGrantArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let mut selectors = args.peers.clone();
+    if selectors.is_empty() {
+        if args.json {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "`lanfp peer grant --json` requires at least one PEER",
+            ));
+        }
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "stdin is not a terminal; pass a PEER: `lanfp peer grant <name|uuid|ip>`",
+            ));
+        }
+        let Some(selector) = interactive_grant_target(&paths).await? else {
+            println!("cancelled");
+            return Ok(());
+        };
+        selectors.push(selector);
+    }
+
+    let response = client::call(
+        &paths,
+        Command::PeerGrant {
+            peers: selectors,
+            force: args.force,
+        },
+        true,
+    )
+    .await?;
+    let result: PeerGrantResult = decode(response.data)?;
+    if args.json {
+        print_json(&result).map_err(CliError::internal)?;
+    } else {
+        for peer in &result.granted {
+            if peer.already_granted {
+                println!(
+                    "already granted {} [{}] (refreshed)",
+                    peer.peer,
+                    short_id(peer.id)
+                );
+            } else {
+                println!("granted {} [{}]", peer.peer, short_id(peer.id));
+            }
+            println!("key fingerprint: {}", peer.fingerprint);
+            println!("this device may now connect and forward exposed ports on this machine");
+        }
+        for failure in &result.failed {
+            eprintln!("failed to grant {}: {}", failure.peer, failure.message);
+        }
+    }
+    if let Some(failure) = result.failed.first() {
+        let code = ExitCode::from_code(failure.code).unwrap_or(ExitCode::AuthorizationFailed);
+        return Err(CliError::new(code, ""));
+    }
+    Ok(())
+}
+
+async fn interactive_grant_target(paths: &Paths) -> Result<Option<String>, CliError> {
+    let response = client::call(paths, Command::Scan { timeout_ms: 0 }, true).await?;
+    let result: ScanResult = decode(response.data)?;
+    let candidates: Vec<&ScanPeer> = result
+        .peers
+        .iter()
+        .filter(|p| p.version == PROTOCOL_VERSION)
+        .collect();
+    if candidates.is_empty() {
+        let incompatible = result.peers.len();
+        let detail = if incompatible > 0 {
+            format!(" ({incompatible} incompatible device(s) skipped)")
+        } else {
+            String::new()
+        };
+        return Err(CliError::new(
+            ExitCode::DeviceNotFound,
+            format!("no devices available to authorize{detail}; start `lanfp serve` on the other device or pass an address"),
+        ));
+    }
+    println!("discovered devices:");
+    for (index, peer) in candidates.iter().enumerate() {
+        println!(
+            "  {}. {:<10} {:<32} {}",
+            index + 1,
+            short_id(peer.id),
+            peer.peer,
+            if peer.authorized {
+                "authorized"
+            } else if peer.known {
+                "server"
+            } else {
+                "unknown"
+            }
+        );
+    }
+    print!("select device [1-{}] (q to cancel): ", candidates.len());
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| CliError::new(ExitCode::Usage, format!("cannot read selection: {e}")))?;
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("q") {
+        return Ok(None);
+    }
+    let index: usize = line.parse().map_err(|_| {
+        CliError::new(
+            ExitCode::Usage,
+            format!(
+                "`{line}` is not a selection between 1 and {}",
+                candidates.len()
+            ),
+        )
+    })?;
+    let Some(peer) = index.checked_sub(1).and_then(|i| candidates.get(i)) else {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            format!("selection must be between 1 and {}", candidates.len()),
+        ));
+    };
+    Ok(Some(peer.id.to_string()))
+}
+
+async fn peer_revoke(args: crate::cli::PeerRevokeArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(&paths, Command::PeerRevoke { peers: args.peers }, true).await?;
+    let result: PeerRevokeResult = decode(response.data)?;
+    if args.json {
+        return print_json(&result).map_err(CliError::internal);
+    }
+    for peer in &result.revoked {
+        println!("revoked {} [{}]", peer.peer, short_id(peer.id));
+    }
+    Ok(())
+}
+
+async fn peer_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(&paths, Command::PeerList, true).await?;
+    let result: PeerListResult = decode(response.data)?;
+    if args.json {
+        return print_json(&result).map_err(CliError::internal);
+    }
+    if result.peers.is_empty() {
+        println!("no devices are authorized to access this machine");
+        eprintln!("hint: use `lanfp peer grant` to authorize a device");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = result
+        .peers
+        .iter()
+        .map(|p| {
+            vec![
+                p.id.to_string(),
+                p.name.clone(),
+                if p.address.is_empty() {
+                    "-".into()
+                } else {
+                    p.address.clone()
+                },
+                p.port.to_string(),
+                if p.online { "online" } else { "offline" }.to_string(),
+                relative_time(p.since),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "NAME", "ADDRESS", "PORT", "STATE", "SINCE"], &rows);
+    Ok(())
+}
+
+async fn peer_set_address(args: crate::cli::PeerSetAddressArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(
+        &paths,
+        Command::PeerSetAddress {
+            peer: args.peer,
+            address: args.address,
+        },
+        true,
+    )
+    .await?;
+    let result: PeerSetAddressResult = decode(response.data)?;
+    if args.json {
+        return print_json(&result).map_err(CliError::internal);
+    }
+    if result.online {
+        println!("updated {} [{}] (online)", result.peer, short_id(result.id));
+    } else {
+        println!(
+            "updated {} [{}] (offline; retrying in the background)",
+            result.peer,
+            short_id(result.id)
+        );
+    }
+    Ok(())
+}
+
+async fn expose_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(&paths, Command::ExposeList, true).await?;
+    let result: ExposeListResult = decode(response.data)?;
+    if args.json {
+        return print_json(&result).map_err(CliError::internal);
+    }
+    match result.mode {
+        ExposeMode::All => println!(
+            "mode: all (every listening port is exposed, including ports that start listening later)"
+        ),
+        ExposeMode::Whitelist => {
+            println!("mode: whitelist (only listed ports are exposed)")
+        }
+    }
+    if result.ports.is_empty() {
+        println!("no listening ports");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = result
+        .ports
+        .iter()
+        .map(|p| {
+            let inbound = p.inbound.iter().map(|i| i.peer_listen).collect::<Vec<_>>();
+            vec![
+                p.port.to_string(),
+                if p.listening {
+                    "listening".into()
+                } else {
+                    "not listening".into()
+                },
+                if p.bind.is_empty() {
+                    "-".into()
+                } else {
+                    p.bind.join(",")
+                },
+                p.process.clone().unwrap_or_else(|| "-".into()),
+                p.user.clone().unwrap_or_else(|| "-".into()),
+                join_ports(&inbound),
+            ]
+        })
+        .collect();
+    print_table(
+        &["PORT", "STATE", "BIND", "PROCESS", "USER", "INBOUND"],
+        &rows,
+    );
+    Ok(())
+}
+
+async fn expose_add(args: crate::cli::ExposeAddArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(&paths, Command::ExposeAdd { ports: args.ports }, true).await?;
+    let result: ExposeAddResult = decode(response.data)?;
+    if args.json {
+        print_json(&result).map_err(CliError::internal)?;
+    } else {
+        println!("exposed {}", join_ports(&result.ports));
+        if result.mode_changed {
+            eprintln!(
+                "warning: whitelist mode enabled; only ports in `lanfp expose list` are accessible"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn expose_remove(args: crate::cli::ExposeRemoveArgs) -> Result<(), CliError> {
+    let paths = paths()?;
+    let response = client::call(&paths, Command::ExposeRemove { ports: args.ports }, true).await?;
+    let result: ExposeRemoveResult = decode(response.data)?;
+    if args.json {
+        print_json(&result).map_err(CliError::internal)?;
+    } else {
+        println!("removed {}", join_ports(&result.ports));
+        if result.mode_changed {
+            eprintln!("warning: whitelist is empty; every listening port is exposed again");
+        }
+    }
     Ok(())
 }
 
@@ -162,6 +461,11 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
             rows.push(vec![
                 peer.peer.clone(),
                 port.port.to_string(),
+                if port.listening {
+                    "listening".into()
+                } else {
+                    "not listening".into()
+                },
                 if port.bind.is_empty() {
                     "-".into()
                 } else {
@@ -191,6 +495,7 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
             "PEER ID",
             "PEER",
             "PORT",
+            "STATE",
             "BIND",
             "PROCESS",
             "USER",
@@ -198,62 +503,6 @@ async fn remote(args: crate::cli::RemoteArgs) -> Result<(), CliError> {
         ],
         &rows,
     );
-    Ok(())
-}
-
-async fn peer_set_address(args: crate::cli::PeerSetAddressArgs) -> Result<(), CliError> {
-    let paths = paths()?;
-    let response = client::call(
-        &paths,
-        Command::PeerSetAddress {
-            peer: args.peer,
-            address: args.address,
-        },
-        true,
-    )
-    .await?;
-    let result: PeerSetAddressResult = decode(response.data)?;
-    if args.json {
-        return print_json(&result).map_err(CliError::internal);
-    }
-    if result.online {
-        println!("updated {} [{}] (online)", result.peer, short_id(result.id));
-    } else {
-        println!(
-            "updated {} [{}] (offline; retrying in the background)",
-            result.peer,
-            short_id(result.id)
-        );
-    }
-    Ok(())
-}
-
-async fn peer_list(args: crate::cli::JsonArgs) -> Result<(), CliError> {
-    let paths = paths()?;
-    let response = client::call(&paths, Command::PeerList, true).await?;
-    let result: PeerListResult = decode(response.data)?;
-    if args.json {
-        return print_json(&result).map_err(CliError::internal);
-    }
-    let rows: Vec<Vec<String>> = result
-        .peers
-        .iter()
-        .map(|p| {
-            vec![
-                p.id.to_string(),
-                p.name.clone(),
-                if p.address.is_empty() {
-                    "-".into()
-                } else {
-                    p.address.clone()
-                },
-                p.port.to_string(),
-                if p.online { "online" } else { "offline" }.to_string(),
-                relative_time(p.paired_at),
-            ]
-        })
-        .collect();
-    print_table(&["ID", "NAME", "ADDRESS", "PORT", "STATE", "SINCE"], &rows);
     Ok(())
 }
 
@@ -369,136 +618,6 @@ async fn inbound(args: crate::cli::JsonArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn peer_add(args: crate::cli::PeerAddArgs) -> Result<(), CliError> {
-    let selector = args.peer.clone();
-    let paths = paths()?;
-    if !args.json {
-        println!("connecting to {selector}...");
-    }
-    let response = client::call(
-        &paths,
-        Command::PairStart {
-            peer: selector.clone(),
-        },
-        true,
-    )
-    .await?;
-    let started: PairStartResult = decode(response.data)?;
-
-    let code = match args.code.clone() {
-        Some(code) => code,
-        None => prompt_code(&started.peer)?,
-    };
-    if code.trim().is_empty() {
-        return Err(CliError::new(
-            ExitCode::PairingFailed,
-            "no pairing code entered",
-        ));
-    }
-    let response = client::call(
-        &paths,
-        Command::PairFinish {
-            token: started.token,
-            code: code.trim().to_string(),
-            force: args.force,
-        },
-        false,
-    )
-    .await?;
-    let finished: PairFinishResult = decode(response.data)?;
-    if args.json {
-        return print_json(&finished).map_err(CliError::internal);
-    }
-    println!("paired with {} [{}]", finished.peer, short_id(finished.id));
-    Ok(())
-}
-
-fn prompt_code(peer: &str) -> Result<String, CliError> {
-    let prompt = format!("pairing code (shown on {peer}): ");
-    if std::io::stdin().is_terminal() {
-        rpassword::prompt_password(prompt)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| CliError::new(ExitCode::PairingFailed, format!("cannot read code: {e}")))
-    } else {
-        print!("{prompt}");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).map_err(|e| {
-            CliError::new(ExitCode::PairingFailed, format!("cannot read code: {e}"))
-        })?;
-        Ok(line.trim().to_string())
-    }
-}
-
-async fn peer_wait(args: crate::cli::PeerWaitArgs) -> Result<(), CliError> {
-    let paths = paths()?;
-    let timeout_secs = match args.timeout.as_deref() {
-        Some(raw) => parse_duration(raw)
-            .map_err(|e| CliError::new(ExitCode::Usage, e.to_string()))?
-            .as_secs(),
-        None => 0,
-    };
-    let response = client::call(&paths, Command::PairWaitStart { timeout_secs }, true).await?;
-    let started: PairWaitStartResult = decode(response.data)?;
-    println!("waiting for pairing request (Ctrl-C to cancel)...");
-
-    let mut announced = false;
-    let mut last_attempts: Option<u32> = Some(started.max_attempts);
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                let _ = client::call(&paths, Command::PairCancel { token: started.token }, false).await;
-                println!();
-                println!("cancelled");
-                return Ok(());
-            }
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {}
-        }
-        let response = client::call(
-            &paths,
-            Command::PairWaitPoll {
-                token: started.token,
-            },
-            false,
-        )
-        .await?;
-        let poll: PairWaitPollResult = decode(response.data)?;
-        match poll.state {
-            PairWaitState::Waiting => {
-                if let Some(left) = poll.attempts_left {
-                    if last_attempts.map(|last| left < last).unwrap_or(false) {
-                        eprintln!("pairing attempt rejected; {left} attempt(s) left");
-                    }
-                    last_attempts = Some(left);
-                }
-            }
-            PairWaitState::Incoming => {
-                if !announced {
-                    println!("incoming: {}", poll.peer.clone().unwrap_or_default());
-                    println!(
-                        "pairing code: {}   expires in {}s",
-                        poll.code.clone().unwrap_or_else(|| started.code.clone()),
-                        poll.expires_in.unwrap_or(started.timeout_secs)
-                    );
-                    announced = true;
-                }
-            }
-            PairWaitState::Paired => {
-                println!("paired with {}", poll.peer.unwrap_or_default());
-                return Ok(());
-            }
-            PairWaitState::Failed => {
-                let code = ExitCode::from_code(poll.exit_code.unwrap_or(9))
-                    .unwrap_or(ExitCode::PairingFailed);
-                return Err(CliError::new(
-                    code,
-                    poll.message.unwrap_or_else(|| "pairing failed".into()),
-                ));
-            }
-        }
-    }
-}
-
 async fn serve(args: crate::cli::ServeArgs) -> Result<(), CliError> {
     let paths = paths()?;
     let config = Config::load_or_create(&paths.config_file()).map_err(CliError::internal)?;
@@ -524,7 +643,7 @@ async fn daemon_status(json: bool) -> Result<(), CliError> {
         Ok(response) => response,
         Err(err) if err.code == ExitCode::DaemonUnavailable => {
             if json {
-                println!("{}", serde_json::json!({"schema": 1, "running": false}));
+                println!("{}", serde_json::json!({"schema": 2, "running": false}));
             } else {
                 println!("lanfp is not running");
             }
@@ -540,13 +659,13 @@ async fn daemon_status(json: bool) -> Result<(), CliError> {
     println!("uptime: {}", format_uptime(status.uptime_secs));
     println!("device: {}", status.device);
     println!("device id: {}", status.device_id);
+    println!("fingerprint: {}", status.fingerprint);
     println!("agent: {}", status.agent_addr);
     println!("ipc: {}", status.ipc_path);
     println!("log: {}", status.log_path);
-    println!(
-        "peers: {} paired, {} online",
-        status.peers_paired, status.peers_online
-    );
+    println!("allowed: {} device(s)", status.allowed);
+    println!("servers: {} device(s)", status.servers);
+    println!("online: {}", status.online);
     println!("rules: {}", status.rules);
     Ok(())
 }

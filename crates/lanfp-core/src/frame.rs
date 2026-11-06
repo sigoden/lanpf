@@ -1,6 +1,6 @@
 //! Length-prefixed JSON framing: `u32 BE length + JSON payload`.
 //!
-//! Used by the local IPC channel, the control stream and the pairing channel.
+//! Used by the local IPC channel, the control stream and the grant/identity channels.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -72,7 +72,7 @@ mod tests {
     #[tokio::test]
     async fn json_round_trip() {
         let (mut a, mut b) = tokio::io::duplex(1024);
-        let value = serde_json::json!({"schema": 1, "x": [1, 2, 3]});
+        let value = serde_json::json!({"schema": 2, "x": [1, 2, 3]});
         let v = value.clone();
         tokio::spawn(async move {
             write_json(&mut a, &v).await.unwrap();

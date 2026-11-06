@@ -1,12 +1,11 @@
-//! Identity, TLS pinning, SPAKE2 pairing and pairing payload encryption.
+//! Device identity, TLS pinning, the one-way grant transcript and fingerprints.
 
+pub mod grant;
 pub mod identity;
-pub mod pair;
-pub mod spake;
 pub mod tls;
 
+pub use grant::{fingerprint, grant_transcript, identity_transcript};
 pub use identity::{verify_signature, Identity};
-pub use spake::{generate_code, validate_code, SpakeSession};
 pub use tls::{client_config, install_crypto_provider, server_config, ALPN};
 
 /// Default TLS server name used by the client (the certificate is pinned by

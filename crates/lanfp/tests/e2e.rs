@@ -1,10 +1,10 @@
-//! Loopback end-to-end tests: two daemons, pairing, sessions, forwarding and
+//! Loopback end-to-end tests: two daemons, authorization, sessions, forwarding and
 //! the CLI surface.
 #![cfg(unix)]
 
 use lanfp_core::frame::{read_json, write_json};
 use lanfp_core::ipc::*;
-use lanfp_core::protocol::RuleState;
+use lanfp_core::protocol::{ExposeMode, RuleState};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
@@ -105,16 +105,22 @@ impl Node {
         self.call_ok(Command::Status).await
     }
 
+    async fn device_id(&self) -> String {
+        self.status().await.device_id.to_string()
+    }
+
     async fn wait_online(&self, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let status = self.status().await;
-            if status.peers_online >= count {
+            if status.online >= count {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for {count} online session(s): {status:?}"
+                "timed out waiting for {count} online session(s): {status:?}\nserve.log:\n{}\nserve2.log:\n{}",
+                std::fs::read_to_string(self.home.path().join("serve.log")).unwrap_or_default(),
+                std::fs::read_to_string(self.home.path().join("serve2.log")).unwrap_or_default(),
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -136,38 +142,39 @@ impl Drop for Node {
     }
 }
 
-async fn pair(a: &Node, b: &Node) -> String {
-    let wait: PairWaitStartResult = b.call_ok(Command::PairWaitStart { timeout_secs: 60 }).await;
-    let start: PairStartResult = a
-        .call_ok(Command::PairStart {
-            peer: format!("127.0.0.1:{}", b.port),
-        })
-        .await;
-    let _: PairFinishResult = a
-        .call_ok(Command::PairFinish {
-            token: start.token,
-            code: wait.code.clone(),
+/// Grant the first node access on the second node, then return the second
+/// node's selector as seen by the consumer. The first argument is the
+/// consumer (rule owner); the second is the exposing host.
+async fn pair(consumer: &Node, host: &Node) -> String {
+    let result: PeerGrantResult = host
+        .call_ok(Command::PeerGrant {
+            peers: vec![format!("127.0.0.1:{}", consumer.port)],
             force: false,
         })
         .await;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let poll: PairWaitPollResult = b.call_ok(Command::PairWaitPoll { token: wait.token }).await;
-        match poll.state {
-            PairWaitState::Paired => break,
-            PairWaitState::Failed => panic!("pairing failed: {:?}", poll.message),
-            _ => {}
-        }
-        assert!(Instant::now() < deadline, "pairing did not complete");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    start.peer
+    assert!(
+        result.failed.is_empty(),
+        "grant failed: {:?}",
+        result.failed
+    );
+    consumer.wait_online(1).await;
+    format!("127.0.0.1:{}", host.port)
 }
 
 /// A tiny blocking echo server used as the forwarding target.
 fn start_echo_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    spawn_echo_listener(listener);
+    port
+}
+
+fn start_echo_server_on(port: u16) {
+    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    spawn_echo_listener(listener);
+}
+
+fn spawn_echo_listener(listener: TcpListener) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
@@ -186,7 +193,6 @@ fn start_echo_server() -> u16 {
             });
         }
     });
-    port
 }
 
 fn echo_roundtrip(port: u16, payload: &[u8]) -> Vec<u8> {
@@ -394,74 +400,6 @@ async fn large_transfer_half_close_and_concurrency() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pairing_survives_slow_code_entry() {
-    let a = Node::start().await;
-    let b = Node::start().await;
-
-    let wait: PairWaitStartResult = b.call_ok(Command::PairWaitStart { timeout_secs: 60 }).await;
-    let start: PairStartResult = a
-        .call_ok(Command::PairStart {
-            peer: format!("127.0.0.1:{}", b.port),
-        })
-        .await;
-
-    // A human has to read the code from the other terminal and type it; this
-    // takes longer than a network round trip and must not abort the exchange.
-    tokio::time::sleep(Duration::from_secs(12)).await;
-
-    let _: PairFinishResult = a
-        .call_ok(Command::PairFinish {
-            token: start.token,
-            code: wait.code.clone(),
-            force: false,
-        })
-        .await;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let poll: PairWaitPollResult = b.call_ok(Command::PairWaitPoll { token: wait.token }).await;
-        match poll.state {
-            PairWaitState::Paired => break,
-            PairWaitState::Failed => panic!("pairing failed: {:?}", poll.message),
-            _ => {}
-        }
-        assert!(Instant::now() < deadline, "pairing did not complete");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    a.wait_online(1).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wrong_code_attempts_are_limited() {
-    let a = Node::start().await;
-    let b = Node::start().await;
-
-    let wait: PairWaitStartResult = b.call_ok(Command::PairWaitStart { timeout_secs: 60 }).await;
-    for attempt in 0..5 {
-        let start: PairStartResult = a
-            .call_ok(Command::PairStart {
-                peer: format!("127.0.0.1:{}", b.port),
-            })
-            .await;
-        let err = a
-            .call_err(Command::PairFinish {
-                token: start.token,
-                code: "000000".into(),
-                force: false,
-            })
-            .await;
-        assert_eq!(err.code, 9, "attempt {attempt}");
-        let poll: PairWaitPollResult = b.call_ok(Command::PairWaitPoll { token: wait.token }).await;
-        if attempt < 4 {
-            assert_eq!(poll.state, PairWaitState::Waiting);
-            assert_eq!(poll.attempts_left, Some(4 - attempt as u32));
-        } else {
-            assert_eq!(poll.state, PairWaitState::Failed);
-            assert_eq!(poll.exit_code, Some(9));
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unpaired_tls_client_is_rejected() {
     lanfp_crypto::install_crypto_provider();
     let node = Node::start().await;
@@ -511,17 +449,17 @@ async fn cli_reports_documented_exit_codes() {
     let a = Node::start().await;
     let b = Node::start().await;
 
-    // Pairing without `peer wait` fails with code 6.
-    let started = Instant::now();
-    let output = a.cli(&[
-        "peer",
-        "add",
-        &format!("127.0.0.1:{}", b.port),
-        "--code",
-        "123456",
-    ]);
-    assert_eq!(output.status.code(), Some(6), "{output:?}");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    // The old pairing commands are gone.
+    assert_eq!(a.cli(&["peer", "add"]).status.code(), Some(2));
+    assert_eq!(a.cli(&["peer", "wait"]).status.code(), Some(2));
+
+    // A consumer that has not been granted access is rejected.
+    let not_granted = a
+        .call_err(Command::Remote {
+            peer: Some(format!("127.0.0.1:{}", b.port)),
+        })
+        .await;
+    assert_eq!(not_granted.code, 4, "{not_granted:?}");
 
     let peer = pair(&a, &b).await;
     a.wait_online(1).await;
@@ -538,7 +476,7 @@ async fn cli_reports_documented_exit_codes() {
         .await;
     assert_eq!(err.code, 2);
 
-    // Unknown peer.
+    // Unreachable peer.
     let err = a
         .call_err(Command::ForwardAdd {
             peer: "10.99.99.99".into(),
@@ -546,7 +484,7 @@ async fn cli_reports_documented_exit_codes() {
             listen: Some(free_port()),
         })
         .await;
-    assert_eq!(err.code, 3);
+    assert_eq!(err.code, 4);
 
     // Port not listening on the peer.
     let closed_port = free_port();
@@ -593,7 +531,7 @@ async fn cli_reports_documented_exit_codes() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
-    while a.status().await.peers_online > 0 {
+    while a.status().await.online > 0 {
         assert!(Instant::now() < deadline, "session did not drop");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -608,23 +546,23 @@ async fn json_outputs_and_single_instance() {
     let local = a.cli(&["local", "--json"]);
     assert!(local.status.success());
     let value: serde_json::Value = serde_json::from_slice(&local.stdout).expect("valid json");
-    assert_eq!(value["schema"], 1);
+    assert_eq!(value["schema"], 2);
     assert!(value["ports"].is_array());
 
     let scan = a.cli(&["scan", "--timeout", "100ms", "--json"]);
     assert!(scan.status.success());
     let value: serde_json::Value = serde_json::from_slice(&scan.stdout).expect("valid json");
-    assert_eq!(value["schema"], 1);
+    assert_eq!(value["schema"], 2);
 
     let forwards = a.cli(&["forward", "list", "--json"]);
     assert!(forwards.status.success());
     let value: serde_json::Value = serde_json::from_slice(&forwards.stdout).unwrap();
-    assert_eq!(value["schema"], 1);
+    assert_eq!(value["schema"], 2);
 
     let inbound = a.cli(&["inbound", "--json"]);
     assert!(inbound.status.success());
     let value: serde_json::Value = serde_json::from_slice(&inbound.stdout).unwrap();
-    assert_eq!(value["schema"], 1);
+    assert_eq!(value["schema"], 2);
 
     // A second `serve` must detect the running instance and exit 0.
     let second = a.cli(&["serve"]);
@@ -691,17 +629,19 @@ async fn peer_set_address_updates_the_record() {
     let a = Node::start().await;
     let b = Node::start().await;
     let peer = pair(&a, &b).await;
-    let peer_name = peer.split('@').next().unwrap().to_string();
     a.wait_online(1).await;
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    let entry = remote.peers[0].clone();
+    let peer_name = entry.name.clone();
 
-    // Repoint the peer at a port that is not listening and check the CLI
+    // Repoint the server at a port that is not listening and check the CLI
     // reports the stored address while the current session stays up.
     let wrong_port = free_port();
     let wrong = format!("127.0.0.1:{wrong_port}");
     let output = a.cli(&["peer", "set-address", &peer, &wrong, "--json"]);
     assert!(output.status.success(), "{output:?}");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
-    assert_eq!(value["schema"], 1);
+    assert_eq!(value["schema"], 2);
     assert_eq!(value["address"], wrong);
     assert_eq!(value["online"], true);
 
@@ -737,20 +677,27 @@ async fn peer_list_and_selector_forms() {
     let _ = pair(&a, &b).await;
     a.wait_online(1).await;
 
-    let list: PeerListResult = a.call_ok(Command::PeerList).await;
-    assert_eq!(list.peers.len(), 1);
-    let entry = &list.peers[0];
+    // Authorization is one-way: the host lists the consumer, the consumer
+    // does not list the host as an authorized device.
+    let allowed: PeerListResult = b.call_ok(Command::PeerList).await;
+    assert_eq!(allowed.peers.len(), 1);
+    assert_eq!(allowed.peers[0].port, a.port);
+    let consumer: PeerListResult = a.call_ok(Command::PeerList).await;
+    assert!(consumer.peers.is_empty());
+
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    let entry = &remote.peers[0];
     assert_eq!(entry.address, "127.0.0.1");
     assert_eq!(entry.port, b.port);
     assert!(entry.online);
     let full = entry.id;
     let short = lanfp_core::short_id(full);
 
-    let text = a.cli(&["peer", "list"]);
+    let text = b.cli(&["peer", "list"]);
     assert!(text.status.success(), "{text:?}");
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(stdout.contains("ID"), "{stdout}");
-    assert!(stdout.contains(&full.to_string()), "{stdout}");
+    assert!(stdout.contains(&a.device_id().await), "{stdout}");
 
     let simple = full.simple().to_string();
     let selectors = vec![
@@ -771,16 +718,12 @@ async fn peer_list_and_selector_forms() {
         assert_eq!(remote.peers[0].id, full, "selector `{selector}`");
     }
 
-    // A stale name@address is reported with the current location.
-    let stale = format!("{}@127.0.0.1:{}", entry.name, free_port());
     let err = a
         .call_err(Command::Remote {
-            peer: Some(stale.clone()),
+            peer: Some("nobody".into()),
         })
         .await;
     assert_eq!(err.code, 3, "{err:?}");
-    assert!(err.message.contains("currently at"), "{err:?}");
-    assert!(err.message.contains(&short), "{err:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -792,10 +735,10 @@ async fn duplicate_names_are_ambiguous() {
     let _ = pair(&a, &c).await;
     a.wait_online(2).await;
 
-    let list: PeerListResult = a.call_ok(Command::PeerList).await;
-    assert_eq!(list.peers.len(), 2);
-    let name = list.peers[0].name.clone();
-    assert_eq!(list.peers[1].name, name);
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    assert_eq!(remote.peers.len(), 2);
+    let name = remote.peers[0].name.clone();
+    assert_eq!(remote.peers[1].name, name);
 
     let err = a
         .call_err(Command::Remote {
@@ -806,24 +749,234 @@ async fn duplicate_names_are_ambiguous() {
     assert!(err.message.contains("matches 2 devices"), "{err:?}");
     assert!(
         err.message
-            .contains(&lanfp_core::short_id(list.peers[0].id)),
+            .contains(&lanfp_core::short_id(remote.peers[0].id)),
         "{err:?}"
     );
 
     // The stable ID disambiguates, and so does the full address.
-    let chosen = &list.peers[1];
-    let remote: RemoteResult = a
+    let chosen = &remote.peers[1];
+    let listed: RemoteResult = a
         .call_ok(Command::Remote {
             peer: Some(lanfp_core::short_id(chosen.id)),
         })
         .await;
-    assert_eq!(remote.peers[0].id, chosen.id);
-    let remote: RemoteResult = a
+    assert_eq!(listed.peers[0].id, chosen.id);
+    let listed: RemoteResult = a
         .call_ok(Command::Remote {
             peer: Some(format!("127.0.0.1:{}", chosen.port)),
         })
         .await;
-    assert_eq!(remote.peers[0].id, chosen.id);
+    assert_eq!(listed.peers[0].id, chosen.id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grant_is_one_way() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let _ = pair(&a, &b).await;
+    a.wait_online(1).await;
+
+    let host_view: PeerListResult = b.call_ok(Command::PeerList).await;
+    assert_eq!(host_view.peers.len(), 1);
+    assert_eq!(host_view.peers[0].port, a.port);
+    let consumer_view: PeerListResult = a.call_ok(Command::PeerList).await;
+    assert!(consumer_view.peers.is_empty());
+
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    assert_eq!(remote.peers.len(), 1);
+    assert_eq!(remote.peers[0].id, b.status().await.device_id);
+    assert_eq!(remote.peers[0].mode, ExposeMode::All);
+    assert!(remote.peers[0].ports.iter().all(|p| p.listening));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expose_whitelist_and_non_listening() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let peer = pair(&a, &b).await;
+    a.wait_online(1).await;
+
+    let p1 = start_echo_server();
+    let p3 = start_echo_server();
+    let p2 = free_port();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let add: ExposeAddResult = b
+        .call_ok(Command::ExposeAdd {
+            ports: vec![p1, p2],
+        })
+        .await;
+    assert_eq!(add.mode, ExposeMode::Whitelist);
+    assert!(add.mode_changed);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let remote: RemoteResult = a.call_ok(Command::Remote { peer: None }).await;
+    let view = &remote.peers[0];
+    assert_eq!(view.mode, ExposeMode::Whitelist);
+    let mut ports: Vec<u16> = view.ports.iter().map(|p| p.port).collect();
+    ports.sort_unstable();
+    let mut expected = vec![p1, p2];
+    expected.sort_unstable();
+    assert_eq!(ports, expected);
+    assert!(
+        view.ports
+            .iter()
+            .find(|p| p.port == p1)
+            .expect("p1")
+            .listening
+    );
+    assert!(
+        !view
+            .ports
+            .iter()
+            .find(|p| p.port == p2)
+            .expect("p2")
+            .listening
+    );
+    assert!(!ports.contains(&p3));
+
+    // The whitelist may contain a port before it listens.
+    let listen_port = free_port();
+    let added: ForwardAddResult = a
+        .call_ok(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: p2,
+            listen: Some(listen_port),
+        })
+        .await;
+    assert_eq!(added.state, RuleState::TargetGone);
+
+    // A listening but unexposed port is rejected.
+    let err = a
+        .call_err(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: p3,
+            listen: Some(free_port()),
+        })
+        .await;
+    assert_eq!(err.code, 8, "{err:?}");
+
+    // Start the target; the pre-created rule becomes active and inbound
+    // appears only once the forwarding is real.
+    start_echo_server_on(p2);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
+    let rule = list
+        .forwards
+        .iter()
+        .find(|f| f.local == listen_port)
+        .expect("rule");
+    assert_eq!(rule.state, RuleState::Active);
+    let inbound: InboundResult = b.call_ok(Command::Inbound).await;
+    assert!(inbound
+        .inbound
+        .iter()
+        .any(|i| i.my_port == p2 && i.peer_listen == listen_port && i.online));
+
+    // Removing p2 from the whitelist stops the forwarding and clears inbound.
+    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p2] }).await;
+    assert_eq!(removed.mode, ExposeMode::Whitelist);
+    assert!(!removed.mode_changed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let inbound: InboundResult = b.call_ok(Command::Inbound).await;
+    assert!(inbound.inbound.iter().all(|i| i.my_port != p2));
+    let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
+    let rule = list
+        .forwards
+        .iter()
+        .find(|f| f.local == listen_port)
+        .expect("rule");
+    assert_eq!(rule.state, RuleState::TargetGone);
+
+    // Removing the last entry returns to "all"; p2 is listening again and the
+    // rule recovers automatically.
+    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p1] }).await;
+    assert_eq!(removed.mode, ExposeMode::All);
+    assert!(removed.mode_changed);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let list: ForwardListResult = a.call_ok(Command::ForwardList).await;
+    let rule = list
+        .forwards
+        .iter()
+        .find(|f| f.local == listen_port)
+        .expect("rule");
+    assert_eq!(rule.state, RuleState::Active);
+    let inbound: InboundResult = b.call_ok(Command::Inbound).await;
+    assert!(inbound.inbound.iter().any(|i| i.my_port == p2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expose_multiple_ports_and_remove_errors() {
+    let b = Node::start().await;
+    let p1 = free_port();
+    let p2 = free_port();
+    let add: ExposeAddResult = b
+        .call_ok(Command::ExposeAdd {
+            ports: vec![p1, p2, p1],
+        })
+        .await;
+    assert_eq!(add.mode, ExposeMode::Whitelist);
+    assert_eq!(add.ports, vec![p1, p2]);
+    assert!(add.mode_changed);
+
+    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p1] }).await;
+    assert_eq!(removed.mode, ExposeMode::Whitelist);
+    assert!(!removed.mode_changed);
+
+    let err = b
+        .call_err(Command::ExposeRemove {
+            ports: vec![p2, free_port()],
+        })
+        .await;
+    assert_eq!(err.code, 3, "{err:?}");
+    // The failed all-or-nothing removal did not change p2.
+    let list: ExposeListResult = b.call_ok(Command::ExposeList).await;
+    assert_eq!(list.mode, ExposeMode::Whitelist);
+    assert_eq!(list.ports.len(), 1);
+    assert_eq!(list.ports[0].port, p2);
+
+    let removed: ExposeRemoveResult = b.call_ok(Command::ExposeRemove { ports: vec![p2] }).await;
+    assert_eq!(removed.mode, ExposeMode::All);
+    assert!(removed.mode_changed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_drops_session_and_inbound() {
+    let a = Node::start().await;
+    let b = Node::start().await;
+    let peer = pair(&a, &b).await;
+    a.wait_online(1).await;
+    let echo_port = start_echo_server();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let listen_port = free_port();
+    let _: ForwardAddResult = a
+        .call_ok(Command::ForwardAdd {
+            peer: peer.clone(),
+            target_port: echo_port,
+            listen: Some(listen_port),
+        })
+        .await;
+    assert_eq!(
+        echo_roundtrip(listen_port, b"before revoke"),
+        b"before revoke".to_vec()
+    );
+
+    let revoked: PeerRevokeResult = b
+        .call_ok(Command::PeerRevoke {
+            peers: vec![format!("127.0.0.1:{}", a.port)],
+        })
+        .await;
+    assert_eq!(revoked.revoked.len(), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while a.status().await.online > 0 {
+        assert!(Instant::now() < deadline, "session did not drop");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let inbound: InboundResult = b.call_ok(Command::Inbound).await;
+    assert!(inbound.inbound.is_empty());
+    let err = a.call_err(Command::Remote { peer: Some(peer) }).await;
+    assert_eq!(err.code, 4, "{err:?}");
 }
 
 #[test]
@@ -831,7 +984,7 @@ fn cli_surface_is_noun_grouped() {
     let help = run_cli(&["--help"]);
     assert!(help.status.success(), "{help:?}");
     let text = String::from_utf8_lossy(&help.stdout);
-    for group in ["peer", "forward", "daemon"] {
+    for group in ["peer", "expose", "forward", "daemon"] {
         assert!(text.contains(&format!("\n  {group} ")), "{text}");
     }
     assert!(!text.contains("\n  pair "), "{text}");
@@ -839,36 +992,34 @@ fn cli_surface_is_noun_grouped() {
     let peer = run_cli(&["peer", "--help"]);
     assert!(peer.status.success(), "{peer:?}");
     let text = String::from_utf8_lossy(&peer.stdout);
-    for sub in ["add", "wait", "list", "set-address"] {
+    for sub in ["list", "grant", "revoke", "set-address"] {
         assert!(text.contains(sub), "{text}");
     }
+    assert!(!text.contains("\n  add "), "{text}");
+    assert!(!text.contains("\n  wait "), "{text}");
 
-    let add = run_cli(&["peer", "add", "--help"]);
-    assert!(add.status.success(), "{add:?}");
-    let text = String::from_utf8_lossy(&add.stdout);
-    for option in ["<PEER>", "--code", "--force", "--json"] {
+    let grant = run_cli(&["peer", "grant", "--help"]);
+    assert!(grant.status.success(), "{grant:?}");
+    let text = String::from_utf8_lossy(&grant.stdout);
+    for option in ["PEER", "--force", "--json"] {
         assert!(text.contains(option), "{text}");
     }
 
-    let wait = run_cli(&["peer", "wait", "--help"]);
-    assert!(wait.status.success(), "{wait:?}");
+    let expose = run_cli(&["expose", "--help"]);
+    assert!(expose.status.success(), "{expose:?}");
+    let text = String::from_utf8_lossy(&expose.stdout);
+    for sub in ["list", "add", "remove"] {
+        assert!(text.contains(sub), "{text}");
+    }
+    let add = run_cli(&["expose", "add", "--help"]);
+    assert!(add.status.success(), "{add:?}");
     assert!(
-        String::from_utf8_lossy(&wait.stdout).contains("--timeout"),
-        "{wait:?}"
+        String::from_utf8_lossy(&add.stdout).contains("PORT"),
+        "{add:?}"
     );
 
-    // The old spelling and a missing selector are usage errors.
+    // The old commands are gone.
     assert_eq!(run_cli(&["pair", "127.0.0.1:1"]).status.code(), Some(2));
     assert_eq!(run_cli(&["peer", "add"]).status.code(), Some(2));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn peer_wait_times_out() {
-    let a = Node::start().await;
-    let output = a.cli(&["peer", "wait", "--timeout", "1s"]);
-    assert_eq!(output.status.code(), Some(9), "{output:?}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("waiting for pairing request"), "{stdout}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("timed out"), "{stderr}");
+    assert_eq!(run_cli(&["peer", "wait"]).status.code(), Some(2));
 }

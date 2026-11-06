@@ -13,12 +13,15 @@ pub struct Cli {
 pub enum Commands {
     /// Scan the LAN with mDNS and list discovered devices.
     Scan(ScanArgs),
-    /// Pair with a device, or manage paired devices.
+    /// Authorize devices to access this machine, or manage known devices.
     #[command(subcommand)]
     Peer(PeerCmd),
+    /// Manage the ports exposed to authorized devices.
+    #[command(subcommand)]
+    Expose(ExposeCmd),
     /// List this machine's Native listening ports.
     Local(JsonArgs),
-    /// List Native ports of paired devices.
+    /// List exposed ports of servers that authorized this machine.
     Remote(RemoteArgs),
     /// Manage forwarding rules.
     #[command(subcommand)]
@@ -41,7 +44,7 @@ pub struct ServeArgs {
 
 #[derive(Debug, Args)]
 pub struct JsonArgs {
-    /// Print machine-readable JSON (`schema: 1`).
+    /// Print machine-readable JSON (`schema: 2`).
     #[arg(long)]
     pub json: bool,
 }
@@ -57,7 +60,7 @@ pub struct ScanArgs {
 
 #[derive(Debug, Args)]
 pub struct RemoteArgs {
-    /// Only list this peer.
+    /// Only list this server.
     #[arg(value_name = "PEER")]
     pub peer: Option<String>,
     #[arg(long)]
@@ -66,37 +69,37 @@ pub struct RemoteArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PeerCmd {
-    /// Pair with a device (start the 6-digit handshake).
-    Add(PeerAddArgs),
-    /// Wait for an incoming pairing request and show the 6-digit code.
-    Wait(PeerWaitArgs),
-    /// List paired devices with their stable IDs.
+    /// List devices authorized to access this machine.
     List(JsonArgs),
-    /// Update the address used to reach a paired device.
+    /// Authorize one or more devices; without PEER, pick from a scan.
+    Grant(PeerGrantArgs),
+    /// Revoke the authorization of one or more devices.
+    Revoke(PeerRevokeArgs),
+    /// Update the address used to reach a known device.
     SetAddress(PeerSetAddressArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct PeerAddArgs {
-    /// Peer selector (`<name>@<address>`, `<ip>[:port]`).
-    #[arg(value_name = "PEER")]
-    pub peer: String,
-    /// Pairing code shown on the waiting device (skips the prompt).
-    #[arg(long, value_name = "CODE")]
-    pub code: Option<String>,
-    /// Replace an existing trust entry when the device's key changed.
+pub struct PeerGrantArgs {
+    /// Peer selectors (`<name>`, `<uuid>`, `<ip>[:port]`). Omit to scan and pick.
+    #[arg(value_name = "PEER", num_args = 0..)]
+    pub peers: Vec<String>,
+    /// Replace a device's key after a reinstall.
     #[arg(long)]
     pub force: bool,
-    /// Print JSON instead of text.
+    /// Print JSON instead of text (requires at least one PEER).
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Debug, Args)]
-pub struct PeerWaitArgs {
-    /// How long to wait for an incoming request (e.g. 300s).
-    #[arg(long, value_name = "DURATION")]
-    pub timeout: Option<String>,
+pub struct PeerRevokeArgs {
+    /// Peer selectors (`<name>`, `<uuid>`, `<ip>[:port]`).
+    #[arg(value_name = "PEER", required = true, num_args = 1..)]
+    pub peers: Vec<String>,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -107,6 +110,36 @@ pub struct PeerSetAddressArgs {
     /// New address as `<ip>[:port]`; the port defaults to 47811.
     #[arg(value_name = "ADDRESS")]
     pub address: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExposeCmd {
+    /// List the effective exposure view.
+    List(JsonArgs),
+    /// Add one or more ports to the whitelist (they need not be listening).
+    Add(ExposeAddArgs),
+    /// Remove one or more ports from the whitelist.
+    Remove(ExposeRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ExposeAddArgs {
+    /// Ports to expose.
+    #[arg(value_name = "PORT", required = true, num_args = 1..)]
+    pub ports: Vec<u16>,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ExposeRemoveArgs {
+    /// Ports to remove from the whitelist.
+    #[arg(value_name = "PORT", required = true, num_args = 1..)]
+    pub ports: Vec<u16>,
+    /// Print JSON instead of text.
     #[arg(long)]
     pub json: bool,
 }
@@ -126,7 +159,7 @@ pub struct ForwardAddArgs {
     /// Peer selector (`<name>@<address>` or `<ip>[:port]`).
     #[arg(value_name = "PEER")]
     pub peer: String,
-    /// Native port on the peer.
+    /// Port exposed by the peer.
     #[arg(value_name = "TARGET_PORT")]
     pub target_port: u16,
     /// Local loopback port (defaults to the target port; 0 picks a free port).

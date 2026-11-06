@@ -3,7 +3,7 @@
 
 use crate::daemon::{internal, ipc_err, low_port_error, Daemon, RuleListener};
 use crate::db::RuleRecord;
-use crate::session::{peer_has_port, proxy_streams};
+use crate::session::{peer_exposes_port, proxy_streams};
 use crate::util::{human_bytes, now_ts};
 use anyhow::Result;
 use lanfp_core::error::ExitCode;
@@ -61,27 +61,23 @@ impl Daemon {
         if target_port == 0 {
             return Err(ipc_err(ExitCode::Usage, "target port must not be 0"));
         }
-        let peer = self.resolve_paired_peer(&peer_selector)?;
-        let Some(handle) = self.sessions.get(peer.device_id) else {
+        let peer = self.resolve_dialable_or_learn(&peer_selector).await?;
+        let handle = self.ensure_online(&peer).await?;
+        if !peer_exposes_port(&handle, target_port) {
             return Err(ipc_err(
-                ExitCode::NotPairedOrOffline,
+                ExitCode::TargetNotExposed,
                 format!(
-                    "{} [{}] is offline",
-                    self.display_peer(&peer),
-                    lanfp_core::short_id(peer.device_id)
-                ),
-            ));
-        };
-        if !peer_has_port(&handle, target_port) {
-            return Err(ipc_err(
-                ExitCode::TargetNotInInventory,
-                format!(
-                    "port {target_port} is not in {} [{}]'s Native inventory",
+                    "port {target_port} is not exposed by {} [{}]; run `lanfp remote` to see exposed ports",
                     self.display_peer(&peer),
                     lanfp_core::short_id(peer.device_id)
                 ),
             ));
         }
+        let listening = handle
+            .exposure()
+            .ports
+            .iter()
+            .any(|p| p.port == target_port && p.listening);
         let requested_port = listen.unwrap_or(target_port);
         let (listener, listen_port) = if requested_port == 0 {
             self.bind_auto_listener().await?
@@ -122,8 +118,18 @@ impl Daemon {
             target_port,
             listen_port,
             enabled: true,
-            state: RuleState::Active,
-            last_error: None,
+            state: if listening {
+                RuleState::Active
+            } else {
+                RuleState::TargetGone
+            },
+            last_error: if listening {
+                None
+            } else {
+                Some(format!(
+                    "target port {target_port} is not listening on the peer"
+                ))
+            },
             created_at: now,
             updated_at: now,
         };
@@ -157,7 +163,7 @@ impl Daemon {
     }
 
     pub fn forward_list_json(&self) -> Result<serde_json::Value, IpcError> {
-        let peers = self.db.list_peers().map_err(internal)?;
+        let peers = self.db.list_trust().map_err(internal)?;
         let mut rules: Vec<RuleRecord> = self.rules.read().unwrap().values().cloned().collect();
         rules.sort_by_key(|r| r.listen_port);
         let forwards: Vec<ForwardInfo> = rules

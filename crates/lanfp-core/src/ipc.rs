@@ -4,7 +4,7 @@
 //! carries an `id` which is echoed in the response.
 
 use crate::error::ExitCode;
-use crate::protocol::{PortInfo, RuleState};
+use crate::protocol::{ExposeMode, PortInfo, RuleState};
 use crate::JSON_SCHEMA;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,30 +41,31 @@ pub enum Command {
         local_port: u16,
     },
     Inbound,
-    PairStart {
-        peer: String,
-    },
-    PairFinish {
-        token: Uuid,
-        code: String,
+    /// Authorize one or more devices to connect to this machine. The grant
+    /// handshake also lets the grantee learn this machine as a server.
+    PeerGrant {
+        peers: Vec<String>,
         force: bool,
     },
-    PairCancel {
-        token: Uuid,
+    /// Revoke the authorization of one or more devices.
+    PeerRevoke {
+        peers: Vec<String>,
     },
-    PairWaitStart {
-        timeout_secs: u64,
-    },
-    PairWaitPoll {
-        token: Uuid,
-    },
-    /// Override the address used to reach an already paired device.
+    /// List devices authorized to access this machine.
+    PeerList,
+    /// Override the address used to reach a known device.
     PeerSetAddress {
         peer: String,
         address: String,
     },
-    /// List paired devices with their stable IDs.
-    PeerList,
+    /// Read the effective exposure view of this machine.
+    ExposeList,
+    ExposeAdd {
+        ports: Vec<u16>,
+    },
+    ExposeRemove {
+        ports: Vec<u16>,
+    },
     DaemonStop,
 }
 
@@ -127,7 +128,7 @@ impl Response {
 }
 
 // ---------------------------------------------------------------------------
-// Response payloads (also the shape of `--json` output, with `schema: 1`).
+// Response payloads (also the shape of `--json` output, with `schema: 2`).
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,9 +142,14 @@ pub struct StatusInfo {
     pub device: String,
     /// Stable UUID of this device.
     pub device_id: Uuid,
+    /// SHA-256 of the device public key, hex encoded.
+    pub fingerprint: String,
     pub version: String,
-    pub peers_paired: usize,
-    pub peers_online: usize,
+    /// Devices this machine authorized to connect.
+    pub allowed: usize,
+    /// Devices this machine may dial (servers that authorized it).
+    pub servers: usize,
+    pub online: usize,
     pub rules: usize,
 }
 
@@ -155,13 +161,20 @@ impl StatusInfo {
 pub struct ScanPeer {
     /// `<name>@<address>` selector.
     pub peer: String,
-    /// Stable device UUID reported over mDNS (unverified until pairing).
+    /// Stable device UUID reported over mDNS (unverified until grant).
     pub id: Uuid,
     pub name: String,
     pub address: String,
     pub port: u16,
-    pub paired: bool,
+    /// Protocol version reported over mDNS.
+    pub version: u16,
+    /// This machine authorized the device to connect.
+    pub authorized: bool,
+    /// This machine knows the device as a server it may dial.
+    pub known: bool,
     pub online: bool,
+    /// SHA-256 of the mDNS public key, when advertised.
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +192,8 @@ pub struct LocalResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePort {
     pub port: u16,
+    /// Whether the port is currently listening on the peer.
+    pub listening: bool,
     pub bind: Vec<String>,
     pub process: Option<String>,
     pub user: Option<String>,
@@ -195,6 +210,10 @@ pub struct RemotePeer {
     pub address: String,
     pub port: u16,
     pub online: bool,
+    /// Exposure policy of the peer.
+    pub mode: ExposeMode,
+    /// SHA-256 of the peer's public key, hex encoded.
+    pub fingerprint: String,
     pub ports: Vec<RemotePort>,
 }
 
@@ -268,38 +287,52 @@ pub struct InboundResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairWaitStartResult {
-    pub schema: u32,
-    pub token: Uuid,
-    pub code: String,
-    pub timeout_secs: u64,
-    pub max_attempts: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairStartResult {
-    pub schema: u32,
-    pub token: Uuid,
-    pub peer: String,
-    pub id: Uuid,
-    pub address: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairFinishResult {
-    pub schema: u32,
+pub struct GrantedPeer {
+    /// `<name>@<address>` of the authorized device.
     pub peer: String,
     pub id: Uuid,
     pub name: String,
     pub address: String,
+    pub fingerprint: String,
+    /// The device was already authorized with the same key.
+    pub already_granted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerGrantFailure {
+    /// The selector as supplied by the caller.
+    pub peer: String,
+    pub code: i32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerGrantResult {
+    pub schema: u32,
+    pub granted: Vec<GrantedPeer>,
+    #[serde(default)]
+    pub failed: Vec<PeerGrantFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokedPeer {
+    /// `<name>@<address>` of the revoked device.
+    pub peer: String,
+    pub id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerRevokeResult {
+    pub schema: u32,
+    pub revoked: Vec<RevokedPeer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerSetAddressResult {
     pub schema: u32,
-    /// `<name>@<new address>` of the updated peer.
+    /// `<name>@<new address>` of the updated device.
     pub peer: String,
-    /// Stable UUID of the updated peer.
+    /// Stable UUID of the updated device.
     pub id: Uuid,
     /// New `ip:port` used for future dials.
     pub address: String,
@@ -314,7 +347,9 @@ pub struct PeerListEntry {
     pub address: String,
     pub port: u16,
     pub online: bool,
-    pub paired_at: i64,
+    pub since: i64,
+    /// SHA-256 of the device public key, hex encoded.
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,40 +358,52 @@ pub struct PeerListResult {
     pub peers: Vec<PeerListEntry>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PairWaitState {
-    Waiting,
-    Incoming,
-    Paired,
-    Failed,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExposeInbound {
+    /// Stable UUID of the peer that owns the forward.
+    pub id: Uuid,
+    pub peer: String,
+    /// Local listening port on the forwarding device.
+    pub peer_listen: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairWaitPollResult {
-    pub schema: u32,
-    pub state: PairWaitState,
-    pub peer: Option<String>,
-    pub code: Option<String>,
-    pub attempts_left: Option<u32>,
-    pub exit_code: Option<i32>,
-    pub message: Option<String>,
-    pub expires_in: Option<u64>,
+pub struct ExposePortInfo {
+    pub port: u16,
+    pub listening: bool,
+    #[serde(default)]
+    pub bind: Vec<String>,
+    #[serde(default)]
+    pub process: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub inbound: Vec<ExposeInbound>,
 }
 
-impl PairWaitPollResult {
-    pub fn new(state: PairWaitState) -> Self {
-        Self {
-            schema: JSON_SCHEMA,
-            state,
-            peer: None,
-            code: None,
-            attempts_left: None,
-            exit_code: None,
-            message: None,
-            expires_in: None,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExposeListResult {
+    pub schema: u32,
+    pub mode: ExposeMode,
+    pub ports: Vec<ExposePortInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExposeAddResult {
+    pub schema: u32,
+    pub ports: Vec<u16>,
+    pub mode: ExposeMode,
+    /// The command switched the machine from "all" to "whitelist".
+    pub mode_changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExposeRemoveResult {
+    pub schema: u32,
+    pub ports: Vec<u16>,
+    pub mode: ExposeMode,
+    /// The command emptied the whitelist and returned to "all".
+    pub mode_changed: bool,
 }
 
 #[cfg(test)]
@@ -382,22 +429,23 @@ mod tests {
             Command::ForwardList,
             Command::ForwardRemove { local_port: 3000 },
             Command::Inbound,
-            Command::PairStart {
-                peer: "a@1.2.3.4".into(),
+            Command::PeerGrant {
+                peers: vec!["a@1.2.3.4".into()],
+                force: false,
             },
-            Command::PairFinish {
-                token: Uuid::nil(),
-                code: "123456".into(),
-                force: true,
+            Command::PeerRevoke {
+                peers: vec!["a@1.2.3.4".into()],
             },
-            Command::PairCancel { token: Uuid::nil() },
-            Command::PairWaitStart { timeout_secs: 300 },
-            Command::PairWaitPoll { token: Uuid::nil() },
+            Command::PeerList,
             Command::PeerSetAddress {
                 peer: "a@1.2.3.4".into(),
                 address: "10.0.0.2:47811".into(),
             },
-            Command::PeerList,
+            Command::ExposeList,
+            Command::ExposeAdd {
+                ports: vec![3000, 3001],
+            },
+            Command::ExposeRemove { ports: vec![3000] },
             Command::DaemonStop,
         ];
         for cmd in cmds {
@@ -420,8 +468,11 @@ mod tests {
                     name: "mac-mini".into(),
                     address: "192.168.8.10".into(),
                     port: 47811,
-                    paired: true,
+                    version: 2,
+                    authorized: true,
+                    known: false,
                     online: true,
+                    fingerprint: Some("00".repeat(32)),
                 }],
             },
         );
@@ -433,5 +484,29 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         let back: Response = serde_json::from_str(&json).unwrap();
         assert_eq!(back.error.unwrap().exit_code(), ExitCode::DeviceNotFound);
+    }
+
+    #[test]
+    fn grant_result_round_trip() {
+        let result = PeerGrantResult {
+            schema: JSON_SCHEMA,
+            granted: vec![GrantedPeer {
+                peer: "laptop@192.168.1.5".into(),
+                id: Uuid::nil(),
+                name: "laptop".into(),
+                address: "192.168.1.5:47811".into(),
+                fingerprint: "00".repeat(32),
+                already_granted: false,
+            }],
+            failed: vec![PeerGrantFailure {
+                peer: "missing".into(),
+                code: 3,
+                message: "not found".into(),
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: PeerGrantResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.granted.len(), 1);
+        assert_eq!(back.failed.len(), 1);
     }
 }

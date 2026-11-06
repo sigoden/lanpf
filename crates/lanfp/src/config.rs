@@ -15,7 +15,6 @@ pub struct Config {
     pub agent: AgentConfig,
     pub discovery: DiscoveryConfig,
     pub inventory: InventoryConfig,
-    pub pairing: PairingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,13 +36,6 @@ pub struct DiscoveryConfig {
 #[serde(default)]
 pub struct InventoryConfig {
     pub interval_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PairingConfig {
-    pub code_ttl_secs: u64,
-    pub max_attempts: u32,
 }
 
 impl Default for AgentConfig {
@@ -68,15 +60,6 @@ impl Default for DiscoveryConfig {
 impl Default for InventoryConfig {
     fn default() -> Self {
         Self { interval_ms: 2000 }
-    }
-}
-
-impl Default for PairingConfig {
-    fn default() -> Self {
-        Self {
-            code_ttl_secs: 300,
-            max_attempts: 5,
-        }
     }
 }
 
@@ -122,9 +105,6 @@ impl Config {
         if self.inventory.interval_ms < 100 {
             bail!("inventory.interval_ms must be at least 100");
         }
-        if self.pairing.max_attempts == 0 {
-            bail!("pairing.max_attempts must be greater than zero");
-        }
         Ok(())
     }
 
@@ -138,10 +118,6 @@ impl Config {
 
     pub fn idle_timeout(&self) -> Duration {
         Duration::from_secs(self.agent.idle_timeout_secs.max(1))
-    }
-
-    pub fn pairing_ttl(&self) -> Duration {
-        Duration::from_secs(self.pairing.code_ttl_secs.max(1))
     }
 }
 
@@ -192,7 +168,6 @@ mod tests {
         assert_eq!(c.agent.listen, "0.0.0.0:47811");
         assert_eq!(c.scan_timeout(), Duration::from_secs(3));
         assert_eq!(c.inventory_interval(), Duration::from_millis(2000));
-        assert_eq!(c.pairing_ttl(), Duration::from_secs(300));
     }
 
     #[test]
@@ -204,6 +179,14 @@ mod tests {
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
         assert!(parse_duration("abc").is_err());
         assert!(parse_duration("-1s").is_err());
+    }
+
+    #[test]
+    fn ignores_legacy_pairing_section() {
+        let c: Config =
+            toml::from_str("[agent]\nlisten = \"127.0.0.1:1\"\n[pairing]\ncode_ttl_secs = 1\n")
+                .unwrap();
+        assert_eq!(c.agent.listen, "127.0.0.1:1");
     }
 
     #[test]
@@ -221,6 +204,9 @@ mod tests {
         c.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.agent.listen, c.agent.listen);
-        assert_eq!(loaded.pairing.max_attempts, 5);
+        assert_eq!(
+            loaded.discovery.scan_timeout_secs,
+            c.discovery.scan_timeout_secs
+        );
     }
 }

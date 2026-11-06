@@ -19,26 +19,44 @@
 - Ports are polled every 2 seconds, so a target port may appear/disappear with up to about 2
   seconds of delay.
 
-## Discovery and Pairing
+## Discovery and Authorization
 
 - mDNS may be blocked by firewalls, AP client isolation, VPNs or the macOS 15+ "Local Network"
-  privacy permission. Fallback: `lanfp peer add <ip>`, `lanfp peer add <ip>:<port>`.
-- The UUID shown for an unpaired device in `lanfp scan` comes from its mDNS TXT record and is
-  unauthenticated; it only becomes trustworthy once the device is paired.
-- mDNS advertises only the device name, UUID, protocol version and agent port; it never
-  advertises the port inventory.
-- Only one `lanfp peer wait` is allowed at a time; a second initiator gets "busy" (exit code 6).
-- A 6-digit code has only 1,000,000 combinations; security relies on SPAKE2 + the 5-attempt limit
-  + a 300-second TTL.
+  privacy permission. Fallback: `lanfp peer grant <ip>`, `lanfp peer grant <ip>:<port>`.
+- Interactive `lanfp peer grant` needs at least one mDNS-discovered device; without mDNS, pass
+  the consumer's address explicitly.
+- The UUID, name and public key shown for a discovered device come from its mDNS TXT record and
+  are unauthenticated until the grant handshake. They are bound to the live identity proof, but
+  a forged mDNS record can still make an attacker appear under a chosen name.
+- `lanfp peer grant` requires the target to be online: it opens the grant channel to the target's
+  agent port. A device that is not running `lanfp serve` cannot be authorized.
+- The grant is one-way. It does not let the exposing machine access the consumer. Authorize the
+  other direction separately if needed.
+- Manual addresses are trust-on-first-use: there is no shared code to compare. `peer grant` prints
+  the device fingerprint; verify it with `lanfp daemon status` on the other device if the LAN is
+  not trusted.
 - IPv6 link-local addresses need a scope id (e.g. `fe80::1%eth0`), and PEER parsing currently does
   not support the `%` form; prefer IPv4 or global IPv6 addresses.
-- The pairing code is handed to the CLI for display over local IPC; IPC permissions are 0600.
+- The grant transcript and authorization state are exchanged over local IPC between the CLI and
+  the daemon; IPC permissions are 0600/current-user only.
+
+## Exposure
+
+- Exposure is machine-wide, not per device. Every authorized device sees the same set of exposed
+  ports.
+- An `expose` entry does not bind a service. Adding a port before it is listening is allowed and
+  appears as `not listening`; it becomes reachable only when a service actually listens on it.
+- In `mode: all`, only currently listening ports can be listed; ports that start listening later
+  are exposed automatically but cannot be shown in advance.
+- The agent port and local forwarding listeners cannot be exposed.
+- `lanfp inbound` shows only ports that are currently being forwarded by other devices; it does
+  not list the expose policy.
 
 ## Sessions and Forwarding
 
 - TCP only. No UDP, multi-hop, NAT traversal or public relay.
-- The target must be a port in the server's Native inventory; an arbitrary `host:port` cannot be
-  specified.
+- The target must be in the server's exposure view. In whitelist mode a non-listening exposed
+  target creates a rule in `target_gone` state; it becomes active when the service starts.
 - Forwarding listeners are forced to `127.0.0.1`; binding `0.0.0.0` is not supported.
 - While the peer is offline the listener stays in place but new connections are closed
   immediately; they resume automatically once the peer is back.
@@ -54,26 +72,35 @@
 - Re-advertising after a network change unregisters and re-registers the mDNS record, so peers
   may briefly see the device disappear from `lanfp scan`; established sessions and forwarding
   rules are unaffected.
-- Rules exist only on the listening side; the serving side is read-only.
+- Rules exist only on the consumer side; the exposing side is read-only apart from `inbound`
+  references.
+- A pure consumer always dials the exposing side; the UUID-based dialer election only applies
+  when both devices have authorized each other.
 - A single session carries at most 256 streams and opens at most 100 per second; a stream with no
   bytes flowing for 30 minutes is closed.
 - Only one rule may use a given listening port by default; pass `--listen 0` to let the OS pick
   a free loopback port instead.
 - Both sides must allow inbound traffic on the agent port, otherwise dialing fails in both
   directions and is retried.
+- Revoking on the exposing side does not notify the consumer. Its known-server record remains
+  and is reported offline; a later `peer grant` refreshes it.
+- A session is shared by both directions. Revoking one direction of a mutual authorization
+  drops the session; the other direction recovers on the next dial if it is still authorized.
 
 ## Permissions and Ports
 
 - Linux/macOS: a user-level process cannot listen on `<1024`; `forward add --listen 80` returns 7.
   This version does not guide the user to sudo.
 - Windows: a normal user can usually listen on `<1024`, unlike Unix.
-- Native ports below 1024 on the local machine can still be forwarding targets.
+- Native ports below 1024 on the local machine can still be exposed and used as forwarding
+  targets.
 
 ## Security
 
-- **No reject/revoke/allow-list.** A paired device can access any Native TCP port on this
-  machine; `lanfp inbound` is read-only. Revocation only happens indirectly, by deleting the
-  peer's data directory and pairing again.
+- **No per-device port ACL.** Exposure is global; every authorized device shares the same set.
+- **No code-based MITM resistance.** Authorization relies on mDNS public keys and signed
+  identity proofs; manual addresses are trust-on-first-use. See
+  [Security model](security.md).
 - Windows named pipes use the process default DACL (usually the current user and administrators);
   they are not further restricted to the current user SID only.
 - There is no code signing; the first run may be blocked by system security prompts.
@@ -83,6 +110,7 @@
 
 - Forwards changed `agent.listen` and `discovery.mdns` settings need a restart of the background
   instance; all other settings hot-reload within about 5 seconds.
+- An old `[pairing]` section in `config.toml` is ignored.
 - macOS login autostart is a LaunchAgent. When `lanfp daemon install` runs from a plain SSH
   session, macOS launchd may refuse to bootstrap any service (the session belongs to the
   "Background" manager), so the plist is registered but only takes effect at the next GUI login;
@@ -91,7 +119,7 @@
 - The single-instance lock applies per `LANFP_HOME`/user runtime directory; do not run multiple
   instances for normal use.
 - Configuration, database and identity keys all live under the user directory; backing up the
-  data directory preserves identity, pairings and rules.
+  data directory preserves identity, authorization records and rules.
 
 ## Platform Verification Status
 
@@ -104,13 +132,10 @@
 | Cross-host forwarding | Verified (Linux↔macOS, Linux↔Windows) | Verified (Linux↔macOS) | Verified (Linux↔Windows) |
 | `<1024` listen | Not possible (exit code 7 verified) | Not possible (exit code 7 verified in E2E) | Allowed for an administrator (port 80 verified) |
 
-Real-hardware acceptance covers macOS 15.5 arm64 (serve, IPC, auto-spawn, inventory, `local`,
-`daemon status`) and Windows 11 25H2 (auto-spawn, named-pipe IPC, inventory, daemon lifecycle,
-per-`LANFP_HOME` isolation, HKCU Run registration). Two-host LAN runs between Linux and macOS and
-between Linux and Windows covered discovery, pairing, `remote`, forwarding, removal,
-offline/target-gone recovery, exit codes and JSON. mDNS over Wi-Fi with AP isolation, the macOS
-"Local Network" permission prompt, real login activation of the autostart entries, and the
-loopback E2E suite on Windows remain untested.
+The two-host LAN runs above were performed under the earlier pairing model. Port inventory,
+forwarding, offline/target-gone recovery and JSON results remain relevant, but the one-way
+authorization and expose view need a new real-hardware run. The loopback E2E suite covers the new
+flow on Linux; see [Verification](verification.md).
 
 Windows specifics:
 

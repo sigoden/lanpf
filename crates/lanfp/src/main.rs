@@ -1,5 +1,6 @@
 //! lanfp — LAN port-forwarding manager.
 
+mod authorize;
 mod cli;
 mod client;
 mod commands;
@@ -7,11 +8,11 @@ mod config;
 mod daemon;
 mod db;
 mod discovery;
+mod expose;
 mod forward;
 mod install;
 mod inventory_svc;
 mod output;
-mod pairing;
 mod paths;
 mod session;
 mod util;

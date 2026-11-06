@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 pub const KEY_FILE: &str = "identity.key";
 pub const CERT_FILE: &str = "identity.crt";
 
-/// Ed25519 identity used for TLS and pairing signatures.
+/// Ed25519 identity used for TLS, grant and identity-query signatures.
 pub struct Identity {
     signing: SigningKey,
     key_der: Vec<u8>,
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn generate_sign_and_verify() {
         let id = Identity::generate().unwrap();
-        let msg = b"hello pairing";
+        let msg = b"hello grant";
         let sig = id.sign(msg);
         assert!(verify_signature(&id.public_key_bytes(), msg, &sig));
         assert!(!verify_signature(&id.public_key_bytes(), b"other", &sig));

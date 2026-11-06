@@ -1,5 +1,5 @@
 //! Wire protocol: port inventory entries, control messages, the data-stream
-//! header and the pairing handshake messages.
+//! header, control messages and the grant/identity handshake messages.
 
 use crate::{DATA_HEADER_LEN, DATA_MAGIC};
 use serde::{Deserialize, Serialize};
@@ -111,6 +111,55 @@ impl std::fmt::Display for RuleState {
     }
 }
 
+/// Exposure policy: `All` exposes every Native listening port; `Whitelist`
+/// exposes only the configured ports (which may or may not be listening).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExposeMode {
+    All,
+    Whitelist,
+}
+
+impl ExposeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExposeMode::All => "all",
+            ExposeMode::Whitelist => "whitelist",
+        }
+    }
+}
+
+/// One port in the exposure view sent to authorized devices. A whitelist
+/// entry is reported even while it is not listening, so the consumer can
+/// distinguish `listening` from `not listening`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExposedPort {
+    pub port: u16,
+    pub listening: bool,
+    #[serde(default)]
+    pub bind: Vec<String>,
+    #[serde(default)]
+    pub process: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// The complete exposure view advertised to a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExposureView {
+    pub mode: ExposeMode,
+    pub ports: Vec<ExposedPort>,
+}
+
+impl Default for ExposureView {
+    fn default() -> Self {
+        Self {
+            mode: ExposeMode::All,
+            ports: Vec::new(),
+        }
+    }
+}
+
 /// Control-stream message (framed as `u32 BE length + JSON`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -125,6 +174,14 @@ pub enum ControlMessage {
     Inventory {
         seq: u64,
         ports: Vec<PortInfo>,
+    },
+    /// Exposure policy and the effective port list. `Inventory` remains the
+    /// set of currently listening, exposed ports used for rule state; this
+    /// message drives `lanfp remote` and lets a whitelist entry exist before
+    /// the service starts listening.
+    Exposure {
+        mode: ExposeMode,
+        ports: Vec<ExposedPort>,
     },
     RuleUpsert {
         rule_id: Uuid,
@@ -231,10 +288,15 @@ impl DataHeader {
     }
 }
 
-/// Pairing handshake message (sent on the agent port after `FPP1`).
+/// One-way grant handshake (sent on the agent port after `FPG1`).
+///
+/// The initiator is the device that exposes services; it authorizes the
+/// responder to connect. The responder stores the initiator as a server so it
+/// can dial back, but that record is not an authorization in the other
+/// direction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum PairMessage {
+pub enum GrantMessage {
     Hello {
         version: u16,
         uuid: Uuid,
@@ -244,50 +306,53 @@ pub enum PairMessage {
         nonce: Vec<u8>,
         /// 32-byte Ed25519 public key.
         pubkey: Vec<u8>,
+        /// Self-signed certificate carrying `pubkey`.
+        cert_der: Vec<u8>,
     },
     Challenge {
-        /// 32-byte random nonce chosen by the responder.
-        nonce: Vec<u8>,
-        /// Responder identity, bound into the SPAKE2 transcript.
+        version: u16,
         uuid: Uuid,
         name: String,
         agent_port: u16,
-        /// 32-byte Ed25519 public key of the responder.
-        pubkey: Vec<u8>,
-    },
-    SpakeA {
-        msg: Vec<u8>,
-    },
-    SpakeB {
-        msg: Vec<u8>,
-    },
-    /// AEAD-encrypted device info (see [`PairDeviceInfo`]).
-    Secure {
+        /// 32-byte random nonce chosen by the responder.
         nonce: Vec<u8>,
-        payload: Vec<u8>,
+        pubkey: Vec<u8>,
+        cert_der: Vec<u8>,
+    },
+    Prove {
+        signature: Vec<u8>,
+    },
+    Done,
+    Reject {
+        reason: String,
+        code: i32,
+    },
+}
+
+/// Read-only identity query (sent on the agent port after `FPID`). It is used
+/// by a consumer that wants to pin the key of a server it was granted access
+/// to; it never changes state on the responder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IdentityMessage {
+    Request {
+        version: u16,
+        nonce: Vec<u8>,
+    },
+    Response {
+        version: u16,
+        uuid: Uuid,
+        name: String,
+        agent_port: u16,
+        nonce: Vec<u8>,
+        pubkey: Vec<u8>,
+        cert_der: Vec<u8>,
+        signature: Vec<u8>,
     },
     Reject {
         reason: String,
         code: i32,
     },
-    Failed {
-        reason: String,
-        code: i32,
-    },
-    Done,
-}
-
-/// Payload encrypted with the SPAKE2-derived key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PairDeviceInfo {
-    pub uuid: Uuid,
-    pub name: String,
-    pub agent_port: u16,
-    pub pubkey: Vec<u8>,
-    /// Self-signed certificate carrying `pubkey`.
-    pub cert_der: Vec<u8>,
-    /// Ed25519 signature over the pairing transcript.
-    pub signature: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -334,6 +399,57 @@ mod tests {
     }
 
     #[test]
+    fn grant_and_identity_messages_round_trip() {
+        let id = Uuid::new_v4();
+        let msgs = vec![
+            GrantMessage::Hello {
+                version: 2,
+                uuid: id,
+                name: "host".into(),
+                agent_port: 47811,
+                nonce: vec![1; 32],
+                pubkey: vec![2; 32],
+                cert_der: vec![3; 8],
+            },
+            GrantMessage::Challenge {
+                version: 2,
+                uuid: id,
+                name: "consumer".into(),
+                agent_port: 47811,
+                nonce: vec![4; 32],
+                pubkey: vec![5; 32],
+                cert_der: vec![6; 8],
+            },
+            GrantMessage::Prove {
+                signature: vec![7; 64],
+            },
+            GrantMessage::Done,
+            GrantMessage::Reject {
+                reason: "no".into(),
+                code: 9,
+            },
+        ];
+        for msg in msgs {
+            let json = serde_json::to_string(&msg).unwrap();
+            let back: GrantMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(msg, back);
+        }
+        let response = IdentityMessage::Response {
+            version: 2,
+            uuid: id,
+            name: "host".into(),
+            agent_port: 47811,
+            nonce: vec![8; 32],
+            pubkey: vec![9; 32],
+            cert_der: vec![10; 8],
+            signature: vec![11; 64],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let back: IdentityMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(response, back);
+    }
+
+    #[test]
     fn control_message_round_trip() {
         let msgs = vec![
             ControlMessage::Hello {
@@ -349,6 +465,16 @@ mod tests {
                     port: 3000,
                     bind: vec!["127.0.0.1".into()],
                     pid: Some(42),
+                    process: Some("node".into()),
+                    user: Some("sigo".into()),
+                }],
+            },
+            ControlMessage::Exposure {
+                mode: ExposeMode::Whitelist,
+                ports: vec![ExposedPort {
+                    port: 3000,
+                    listening: true,
+                    bind: vec!["127.0.0.1".into()],
                     process: Some("node".into()),
                     user: Some("sigo".into()),
                 }],

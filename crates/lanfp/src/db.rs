@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS peer (
   cert_der BLOB NOT NULL,
   last_addr TEXT,
   paired_at INTEGER NOT NULL,
-  last_seen_at INTEGER
+  last_seen_at INTEGER,
+  may_connect INTEGER NOT NULL DEFAULT 0,
+  may_dial INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS rule (
@@ -38,6 +40,11 @@ CREATE TABLE IF NOT EXISTS rule (
   last_error TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS expose (
+  port INTEGER PRIMARY KEY,
+  created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS inbound_ref (
@@ -73,6 +80,10 @@ pub struct PeerRecord {
     pub last_addr: Option<String>,
     pub paired_at: i64,
     pub last_seen_at: Option<i64>,
+    /// This device may connect to this machine (set by `lanfp peer grant`).
+    pub may_connect: bool,
+    /// This machine may dial the device (it authorized this machine).
+    pub may_dial: bool,
 }
 
 impl PeerRecord {
@@ -135,6 +146,7 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)
             .context("initialise database schema")?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -181,22 +193,41 @@ impl Db {
         Ok(row)
     }
 
-    pub fn list_peers(&self) -> Result<Vec<PeerRecord>> {
+    fn query_peers(&self, filter: &str) -> Result<Vec<PeerRecord>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at
-             FROM peer ORDER BY name COLLATE NOCASE, device_id",
-        )?;
+        let sql = format!(
+            "SELECT device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at,
+                    may_connect, may_dial
+             FROM peer {filter} ORDER BY name COLLATE NOCASE, device_id"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map([], row_to_peer)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
+    /// Every known device, in either direction.
+    pub fn list_trust(&self) -> Result<Vec<PeerRecord>> {
+        self.query_peers("")
+    }
+
+    /// Devices this machine authorized to connect (`lanfp peer list`).
+    pub fn list_allowed(&self) -> Result<Vec<PeerRecord>> {
+        self.query_peers("WHERE may_connect = 1")
+    }
+
+    /// Devices this machine may dial (servers that authorized it).
+    pub fn list_dialable(&self) -> Result<Vec<PeerRecord>> {
+        self.query_peers("WHERE may_dial = 1")
+    }
+
+    /// Keep the historical name: a trust row, in either direction.
     pub fn get_peer(&self, device_id: Uuid) -> Result<Option<PeerRecord>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at
+            "SELECT device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at,
+                    may_connect, may_dial
              FROM peer WHERE device_id = ?1",
         )?;
         let row = stmt
@@ -205,10 +236,13 @@ impl Db {
         Ok(row)
     }
 
+    /// Keep the historical name: a trust row, in either direction. The TLS
+    /// server verifier separately enforces `may_connect`.
     pub fn peer_by_pubkey(&self, pubkey: &[u8]) -> Result<Option<PeerRecord>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at
+            "SELECT device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at,
+                    may_connect, may_dial
              FROM peer WHERE ed25519_pub = ?1",
         )?;
         let row = stmt.query_row(params![pubkey], row_to_peer).optional()?;
@@ -217,15 +251,18 @@ impl Db {
 
     pub fn upsert_peer(&self, peer: &PeerRecord) -> Result<()> {
         self.lock().execute(
-            "INSERT INTO peer (device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO peer (device_id, name, ed25519_pub, cert_der, last_addr, paired_at, last_seen_at,
+                               may_connect, may_dial)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(device_id) DO UPDATE SET
                name = excluded.name,
                ed25519_pub = excluded.ed25519_pub,
                cert_der = excluded.cert_der,
                last_addr = COALESCE(excluded.last_addr, peer.last_addr),
                paired_at = excluded.paired_at,
-               last_seen_at = excluded.last_seen_at",
+               last_seen_at = excluded.last_seen_at,
+               may_connect = excluded.may_connect,
+               may_dial = excluded.may_dial",
             params![
                 peer.device_id.to_string(),
                 peer.name,
@@ -233,8 +270,26 @@ impl Db {
                 peer.cert_der,
                 peer.last_addr,
                 peer.paired_at,
-                peer.last_seen_at
+                peer.last_seen_at,
+                peer.may_connect as i64,
+                peer.may_dial as i64
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_may_connect(&self, device_id: Uuid) -> Result<()> {
+        self.lock().execute(
+            "UPDATE peer SET may_connect = 0 WHERE device_id = ?1",
+            params![device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_peer(&self, device_id: Uuid) -> Result<()> {
+        self.lock().execute(
+            "DELETE FROM peer WHERE device_id = ?1",
+            params![device_id.to_string()],
         )?;
         Ok(())
     }
@@ -406,12 +461,91 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_inbound_for_peer(&self, peer_id: Uuid) -> Result<()> {
+        self.lock().execute(
+            "DELETE FROM inbound_ref WHERE peer_id = ?1",
+            params![peer_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_expose(&self) -> Result<Vec<u16>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT port FROM expose ORDER BY port")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().map(|p| p as u16).collect())
+    }
+
+    /// Insert ports, ignoring duplicates. Returns the number of new rows.
+    pub fn add_expose(&self, ports: &[u16]) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let mut inserted = 0usize;
+        {
+            let mut stmt =
+                tx.prepare("INSERT OR IGNORE INTO expose (port, created_at) VALUES (?1, ?2)")?;
+            for port in ports {
+                inserted += stmt.execute(params![*port as i64, crate::util::now_ts()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Remove ports. Returns the number of deleted rows.
+    pub fn remove_expose(&self, ports: &[u16]) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let mut removed = 0usize;
+        {
+            let mut stmt = tx.prepare("DELETE FROM expose WHERE port = ?1")?;
+            for port in ports {
+                removed += stmt.execute(params![*port as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     #[allow(dead_code)]
     pub fn count_rules(&self) -> Result<usize> {
         let conn = self.lock();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM rule", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.map(|name| name == column).unwrap_or(false));
+    if !exists {
+        conn.execute_batch(ddl)?;
+    }
+    Ok(())
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    // Old databases have mutual `peer` rows; giving both direction flags the
+    // default of 1 preserves their previous behaviour. Fresh tables declare
+    // both columns with a default of 0 and the code sets them explicitly.
+    ensure_column(
+        conn,
+        "peer",
+        "may_connect",
+        "ALTER TABLE peer ADD COLUMN may_connect INTEGER NOT NULL DEFAULT 1",
+    )?;
+    ensure_column(
+        conn,
+        "peer",
+        "may_dial",
+        "ALTER TABLE peer ADD COLUMN may_dial INTEGER NOT NULL DEFAULT 1",
+    )?;
+    conn.pragma_update(None, "user_version", 1)?;
+    Ok(())
 }
 
 fn parse_uuid(s: String) -> rusqlite::Result<Uuid> {
@@ -429,6 +563,8 @@ fn row_to_peer(row: &Row<'_>) -> rusqlite::Result<PeerRecord> {
         last_addr: row.get(4)?,
         paired_at: row.get(5)?,
         last_seen_at: row.get(6)?,
+        may_connect: row.get::<_, i64>(7)? != 0,
+        may_dial: row.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -479,6 +615,8 @@ mod tests {
             last_addr: Some(addr.into()),
             paired_at: 100,
             last_seen_at: Some(200),
+            may_connect: true,
+            may_dial: true,
         }
     }
 
@@ -506,7 +644,7 @@ mod tests {
         let mut p = peer("mac-mini", "192.168.8.10:47811");
         p.ed25519_pub = vec![9u8; 32];
         db.upsert_peer(&p).unwrap();
-        assert_eq!(db.list_peers().unwrap().len(), 1);
+        assert_eq!(db.list_trust().unwrap().len(), 1);
         let got = db.get_peer(p.device_id).unwrap().unwrap();
         assert_eq!(got.display(), "mac-mini@192.168.8.10");
         assert_eq!(
@@ -575,6 +713,77 @@ mod tests {
         assert_eq!(rows[0].last_seen_at, 3);
         db.delete_inbound(p.device_id, rule_id).unwrap();
         assert!(db.list_inbound().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trust_directions_are_independent() {
+        let (_dir, db) = db();
+        let mut p = peer("laptop", "127.0.0.1:5000");
+        p.may_connect = true;
+        p.may_dial = false;
+        db.upsert_peer(&p).unwrap();
+        assert_eq!(db.list_allowed().unwrap().len(), 1);
+        assert!(db.list_dialable().unwrap().is_empty());
+        assert_eq!(db.list_trust().unwrap().len(), 1);
+
+        p.may_connect = false;
+        p.may_dial = true;
+        db.upsert_peer(&p).unwrap();
+        assert!(db.list_allowed().unwrap().is_empty());
+        assert_eq!(db.list_dialable().unwrap().len(), 1);
+
+        p.may_connect = true;
+        db.upsert_peer(&p).unwrap();
+        db.clear_may_connect(p.device_id).unwrap();
+        assert!(db.list_allowed().unwrap().is_empty());
+        assert_eq!(db.list_dialable().unwrap().len(), 1);
+        db.delete_peer(p.device_id).unwrap();
+        assert!(db.list_trust().unwrap().is_empty());
+    }
+
+    #[test]
+    fn expose_add_remove_and_count() {
+        let (_dir, db) = db();
+        assert!(db.list_expose().unwrap().is_empty());
+        assert_eq!(db.add_expose(&[3000, 3001, 3000]).unwrap(), 2);
+        assert_eq!(db.list_expose().unwrap(), vec![3000, 3001]);
+        assert_eq!(db.remove_expose(&[3000]).unwrap(), 1);
+        assert_eq!(db.list_expose().unwrap(), vec![3001]);
+        assert_eq!(db.remove_expose(&[9999]).unwrap(), 0);
+        assert_eq!(db.remove_expose(&[3001]).unwrap(), 1);
+        assert!(db.list_expose().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_old_peer_rows_as_mutual() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE peer (
+                   device_id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   ed25519_pub BLOB NOT NULL,
+                   cert_der BLOB NOT NULL,
+                   last_addr TEXT,
+                   paired_at INTEGER NOT NULL,
+                   last_seen_at INTEGER
+                 );
+                 INSERT INTO peer VALUES (
+                   '11111111-1111-4111-8111-111111111111',
+                   'old-peer', x'01', x'02', '10.0.0.2:47811', 1, 2
+                 );",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let peers = db.list_trust().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].may_connect);
+        assert!(peers[0].may_dial);
+        assert_eq!(db.list_allowed().unwrap().len(), 1);
+        assert_eq!(db.list_dialable().unwrap().len(), 1);
     }
 
     #[test]
