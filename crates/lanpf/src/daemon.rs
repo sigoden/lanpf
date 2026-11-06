@@ -1174,6 +1174,37 @@ pub fn acquire_lock(paths: &Paths) -> Result<Option<std::fs::File>> {
     }
 }
 
+/// How long a starting daemon waits for a previous instance to release the
+/// lock before reporting that lanpf is already running.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Acquire the daemon lock, waiting briefly for a previous instance that is
+/// still exiting.
+///
+/// A stopping daemon unlinks its IPC socket in `cleanup`, but the lock is only
+/// released during final process teardown. A restart issued right after
+/// `lanpf daemon stop` (or as soon as the socket disappears) must wait for the
+/// old process instead of silently reporting "already running".
+async fn acquire_lock_waiting(paths: &Paths, wait: Duration) -> Result<Option<std::fs::File>> {
+    if let Some(lock) = acquire_lock(paths)? {
+        return Ok(Some(lock));
+    }
+    tracing::info!(
+        "waiting up to {} s for the previous lanpf instance to exit",
+        wait.as_secs()
+    );
+    let deadline = Instant::now() + wait;
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        if let Some(lock) = acquire_lock(paths)? {
+            return Ok(Some(lock));
+        }
+    }
+}
+
 pub fn primary_ip_string() -> String {
     let Ok(interfaces) = if_addrs::get_if_addrs() else {
         return "127.0.0.1".into();
@@ -1209,7 +1240,7 @@ pub async fn serve(paths: Paths, config: Config, hidden: bool) -> Result<()> {
     let _ = hidden;
     paths.ensure()?;
 
-    let Some(lock) = acquire_lock(&paths)? else {
+    let Some(lock) = acquire_lock_waiting(&paths, LOCK_WAIT).await? else {
         let pid = std::fs::read_to_string(paths.pid_file()).unwrap_or_default();
         println!(
             "lanpf is already running (pid {}, ipc {})",
@@ -1286,6 +1317,45 @@ mod tests {
 
     fn v4(port: u16) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::new(192, 168, 8, 8), port))
+    }
+
+    /// An isolated `LANPF_HOME` tree for lock tests.
+    fn temp_paths() -> (tempfile::TempDir, Paths) {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: home.path().join("config"),
+            data_dir: home.path().join("data"),
+            state_dir: home.path().join("state"),
+            runtime_dir: home.path().join("run"),
+        };
+        paths.ensure().unwrap();
+        (home, paths)
+    }
+
+    #[tokio::test]
+    async fn lock_wait_outlasts_a_daemon_that_is_still_exiting() {
+        let (_home, paths) = temp_paths();
+        let held = acquire_lock(&paths).unwrap().expect("first lock");
+        // The old daemon unlinks its IPC socket before it exits and releases
+        // the lock, so a restart has to wait for the process to actually go.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        });
+        let lock = acquire_lock_waiting(&paths, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(lock.is_some());
+    }
+
+    #[tokio::test]
+    async fn lock_wait_gives_up_on_a_daemon_that_keeps_running() {
+        let (_home, paths) = temp_paths();
+        let _held = acquire_lock(&paths).unwrap().expect("first lock");
+        let lock = acquire_lock_waiting(&paths, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(lock.is_none());
     }
 
     #[test]
