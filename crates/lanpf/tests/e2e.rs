@@ -46,14 +46,16 @@ impl Node {
     async fn start_with_expose_ports(entries: &[String]) -> Node {
         let home = TempDir::new().unwrap();
         std::fs::create_dir_all(home.path().join("config")).unwrap();
-        let port = free_port();
         let whitelist = entries
             .iter()
             .map(|p| format!("\"{p}\""))
             .collect::<Vec<_>>()
             .join(", ");
+        // `listen = 0` lets the OS pick the agent port. Reserving one with
+        // `free_port` first can race the other daemons of the suite, which
+        // turns an unrelated test into a bind failure.
         let config = format!(
-            "[agent]\nlisten = \"127.0.0.1:{port}\"\nexpose_ports = [{whitelist}]\n\n[discovery]\nmdns = false\n\n[inventory]\ninterval_ms = 200\n"
+            "[agent]\nlisten = \"127.0.0.1:0\"\nexpose_ports = [{whitelist}]\n\n[discovery]\nmdns = false\n\n[inventory]\ninterval_ms = 200\n"
         );
         std::fs::write(home.path().join("config/config.toml"), config).unwrap();
         let log = std::fs::File::create(home.path().join("serve.log")).unwrap();
@@ -65,13 +67,44 @@ impl Node {
             .stderr(Stdio::from(log))
             .spawn()
             .expect("spawn lanpf serve");
-        let node = Node { home, port, child };
+        let mut node = Node {
+            home,
+            port: 0,
+            child,
+        };
         node.wait_ipc().await;
+        node.port = node
+            .status()
+            .await
+            .agent_addr
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .expect("agent port in `daemon status`");
         node
     }
 
     fn socket(&self) -> PathBuf {
         self.home.path().join("run/ctl.sock")
+    }
+
+    /// Every daemon log this node has written, for failure messages.
+    fn logs(&self) -> String {
+        let mut names = std::fs::read_dir(self.home.path())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with("serve") && name.ends_with(".log"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        names.sort();
+        let mut out = String::new();
+        for name in names {
+            let text = std::fs::read_to_string(self.home.path().join(&name)).unwrap_or_default();
+            out.push_str(&format!("--- {name} ---\n{text}\n"));
+        }
+        out
     }
 
     async fn wait_ipc(&self) {
@@ -82,10 +115,7 @@ impl Node {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!(
-            "daemon did not start; log:\n{}",
-            std::fs::read_to_string(self.home.path().join("serve.log")).unwrap_or_default()
-        );
+        panic!("daemon did not start; logs:\n{}", self.logs());
     }
 
     async fn call(&self, command: Command) -> Response {
@@ -129,9 +159,28 @@ impl Node {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for {count} online session(s): {status:?}\nserve.log:\n{}\nserve2.log:\n{}",
-                std::fs::read_to_string(self.home.path().join("serve.log")).unwrap_or_default(),
-                std::fs::read_to_string(self.home.path().join("serve2.log")).unwrap_or_default(),
+                "timed out waiting for {count} online session(s): {status:?}\n{}",
+                self.logs(),
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Wait until a restored rule is active again: the state stays
+    /// `PeerOffline` until the peer has sent its inventory over the new
+    /// session, which happens after the session itself is online.
+    async fn wait_rule_active(&self, local_port: u16) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let forwards: ForwardListResult = self.call_ok(Command::ForwardList).await;
+            let rule = forwards.forwards.iter().find(|r| r.local == local_port);
+            if rule.is_some_and(|rule| rule.state == RuleState::Active) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "rule on local port {local_port} did not become active: {rule:?}\n{}",
+                self.logs(),
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -611,7 +660,9 @@ async fn rules_survive_daemon_restart() {
         .await;
     assert_eq!(echo_roundtrip(listen_port, b"before"), b"before".to_vec());
 
-    // Stop and restart the rule-owning daemon through the CLI.
+    // Stop and restart the rule-owning daemon through the CLI. `daemon stop`
+    // returns before the process has exited, so the replacement can be spawned
+    // while the old one still holds its lock and agent port.
     let stop = a.cli(&["daemon", "stop"]);
     assert!(stop.status.success(), "{stop:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -620,7 +671,7 @@ async fn rules_survive_daemon_restart() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Replace the killed child with a fresh `serve` process.
+    // Replace the stopped child with a fresh `serve` process.
     let log = std::fs::File::create(a.home.path().join("serve2.log")).unwrap();
     let child = StdCommand::new(bin())
         .arg("serve")
@@ -639,7 +690,7 @@ async fn rules_survive_daemon_restart() {
     let forwards: ForwardListResult = a.call_ok(Command::ForwardList).await;
     assert_eq!(forwards.forwards.len(), 1);
     assert_eq!(forwards.forwards[0].local, listen_port);
-    assert_eq!(forwards.forwards[0].state, RuleState::Active);
+    a.wait_rule_active(listen_port).await;
     assert_eq!(
         echo_roundtrip(listen_port, b"after restart"),
         b"after restart".to_vec()
