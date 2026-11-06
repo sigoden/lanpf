@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/lanfp-core",
-    "crates/lanfp-inventory",
-    "crates/lanfp-crypto",
-    "crates/lanfp",
+    "crates/lanpf-core",
+    "crates/lanpf-inventory",
+    "crates/lanpf-crypto",
+    "crates/lanpf",
 ]
 
 [workspace.package]
@@ -12,7 +12,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.84"
 license = "MIT OR Apache-2.0"
-authors = ["lanfp contributors"]
+authors = ["lanpf contributors"]
 
 [workspace.dependencies]
 anyhow = "1"

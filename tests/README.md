@@ -1,7 +1,7 @@
 # Integration tests
 
-The loopback end-to-end tests live in `crates/lanfp/tests/e2e.rs` so they can
-use the `lanfp` crate's dev-dependencies and the `CARGO_BIN_EXE_lanfp`
+The loopback end-to-end tests live in `crates/lanpf/tests/e2e.rs` so they can
+use the `lanpf` crate's dev-dependencies and the `CARGO_BIN_EXE_lanpf`
 environment variable. Run them with:
 
 ```sh

@@ -59,9 +59,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
-            cross build --locked --release --target ${{ matrix.target }} -p lanfp
+            cross build --locked --release --target ${{ matrix.target }} -p lanpf
           else
-            cargo build --locked --release --target ${{ matrix.target }} -p lanfp
+            cargo build --locked --release --target ${{ matrix.target }} -p lanpf
           fi
 
       - name: Package
@@ -70,17 +70,17 @@ jobs:
         run: |
           set -euo pipefail
           tag=${GITHUB_REF_NAME}
-          name=lanfp-$tag-${{ matrix.target }}
-          exe=target/${{ matrix.target }}/release/lanfp
+          name=lanpf-$tag-${{ matrix.target }}
+          exe=target/${{ matrix.target }}/release/lanpf
           mkdir -p dist
 
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "$exe.exe" dist/lanfp.exe
-            (cd dist && 7z a "$name.zip" lanfp.exe)
+            cp "$exe.exe" dist/lanpf.exe
+            (cd dist && 7z a "$name.zip" lanpf.exe)
             echo "archive=dist/$name.zip" >> "$GITHUB_OUTPUT"
           else
-            cp "$exe" dist/lanfp
-            tar -C dist -czf "dist/$name.tar.gz" lanfp
+            cp "$exe" dist/lanpf
+            tar -C dist -czf "dist/$name.tar.gz" lanpf
             echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 

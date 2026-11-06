@@ -11,10 +11,10 @@
 
 ## Discovery and authorization
 
-- mDNS may be blocked by firewalls, AP client isolation, VPNs or the macOS 15+ "Local Network" permission; fall back to `lanfp peer grant <ip>[:port]`.
+- mDNS may be blocked by firewalls, AP client isolation, VPNs or the macOS 15+ "Local Network" permission; fall back to `lanpf peer grant <ip>[:port]`.
 - Interactive `peer grant` needs at least one discovered device; without mDNS, pass the address explicitly.
 - Discovered name, UUID and key come from the mDNS TXT record and are unauthenticated until the grant handshake; a forged record can still show an attacker under a chosen name. Manual addresses are trust-on-first-use; verify the printed fingerprint if the LAN is not trusted.
-- The target must be online to be granted (it must run `lanfp serve`).
+- The target must be online to be granted (it must run `lanpf serve`).
 - The grant is one-way; authorize the other direction separately if needed.
 - IPv6 link-local addresses need a scope id (`fe80::1%eth0`), and the `%` form is not parsed; prefer IPv4 or global IPv6.
 
@@ -24,7 +24,7 @@
 - The whitelist does not bind a service; a whitelisted port becomes reachable when something listens on it.
 - In all mode only currently listening ports can be listed; later listeners are exposed automatically but cannot be shown in advance.
 - The agent port and local forwarding listeners are never exposed.
-- `lanfp inbound` shows only ports currently forwarded by other devices, not the exposure policy; edit the whitelist in `config.toml`.
+- `lanpf inbound` shows only ports currently forwarded by other devices, not the exposure policy; edit the whitelist in `config.toml`.
 
 ## Sessions and forwarding
 
@@ -57,11 +57,11 @@
 - Changed `agent.listen` and `discovery.mdns` settings need a daemon restart; all other settings hot-reload within about 5 seconds.
 - macOS autostart is a LaunchAgent; from a plain SSH session it may activate only at the next GUI login.
 - Logs rotate once at 5 MiB when the CLI spawns the daemon and do not rotate while running.
-- One instance per `LANFP_HOME`/user runtime directory.
+- One instance per `LANPF_HOME`/user runtime directory.
 - Config, database and identity live under the user directory; backing up the data directory preserves identity, authorizations and rules.
 
 ## Platform notes
 
-- Windows: the IPC pipe name includes the runtime directory, so each `LANFP_HOME` gets its own daemon; the HKCU Run entry does not carry `LANFP_HOME` and always uses the default data directory.
-- Win32-OpenSSH terminates the process tree on disconnect, so an SSH-spawned daemon does not outlive the session; keep `lanfp serve` open for long remote tests.
+- Windows: the IPC pipe name includes the runtime directory, so each `LANPF_HOME` gets its own daemon; the HKCU Run entry does not carry `LANPF_HOME` and always uses the default data directory.
+- Win32-OpenSSH terminates the process tree on disconnect, so an SSH-spawned daemon does not outlive the session; keep `lanpf serve` open for long remote tests.
 - The loopback E2E suite is Unix-only; Windows runs the unit tests only.

@@ -1,43 +1,43 @@
 # Usage and command reference
 
-`lanfp` is one binary. `lanfp serve` runs in the foreground; data commands are short-lived clients that reach the daemon over local IPC and auto-start it when needed. The default output is a table; every data command supports `--json` (`schema: 2`). CLI text and JSON fields are English.
+`lanpf` is one binary. `lanpf serve` runs in the foreground; data commands are short-lived clients that reach the daemon over local IPC and auto-start it when needed. The default output is a table; every data command supports `--json` (`schema: 2`). CLI text and JSON fields are English.
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `lanfp scan [--timeout 3s] [--json]` | mDNS scan: devices and their authorization state |
-| `lanfp peer list [--json]` | Devices authorized to access this machine |
-| `lanfp peer grant [PEER]... [--force] [--json]` | Authorize devices; without PEER, pick from a scan (text only) |
-| `lanfp peer revoke <PEER>... [--json]` | Revoke authorization and drop sessions |
-| `lanfp peer set-address <PEER> <ip[:port]> [--json]` | Update a known device's stored address |
-| `lanfp local [--json]` | Local TCP services (lanfp and forwarded listeners excluded) |
-| `lanfp remote [PEER] [--json]` | Exposed ports of servers that authorized this machine |
-| `lanfp forward add <PEER> <TARGET_PORT> [--listen PORT] [--json]` | Create a forward |
-| `lanfp forward list [--json]` | Local rules |
-| `lanfp forward remove <LOCAL_PORT> [--json]` | Remove a rule and close its listener |
-| `lanfp inbound [--json]` | Read-only: who is forwarding this machine's ports |
-| `lanfp serve` | Run the daemon in the foreground (debugging; `RUST_LOG=debug`) |
-| `lanfp daemon start\|stop\|status` | Manage the background instance |
-| `lanfp daemon install\|uninstall` | Register/remove login autostart |
+| `lanpf scan [--timeout 3s] [--json]` | mDNS scan: devices and their authorization state |
+| `lanpf peer list [--json]` | Devices authorized to access this machine |
+| `lanpf peer grant [PEER]... [--force] [--json]` | Authorize devices; without PEER, pick from a scan (text only) |
+| `lanpf peer revoke <PEER>... [--json]` | Revoke authorization and drop sessions |
+| `lanpf peer set-address <PEER> <ip[:port]> [--json]` | Update a known device's stored address |
+| `lanpf local [--json]` | Local TCP services (lanpf and forwarded listeners excluded) |
+| `lanpf remote [PEER] [--json]` | Exposed ports of servers that authorized this machine |
+| `lanpf forward add <PEER> <TARGET_PORT> [--listen PORT] [--json]` | Create a forward |
+| `lanpf forward list [--json]` | Local rules |
+| `lanpf forward remove <LOCAL_PORT> [--json]` | Remove a rule and close its listener |
+| `lanpf inbound [--json]` | Read-only: who is forwarding this machine's ports |
+| `lanpf serve` | Run the daemon in the foreground (debugging; `RUST_LOG=debug`) |
+| `lanpf daemon start\|stop\|status` | Manage the background instance |
+| `lanpf daemon install\|uninstall` | Register/remove login autostart |
 
 ## Authorization (one-way)
 
-The machine that exposes a service is the **host**; the machine that uses it is the **consumer**. Both machines must be running the daemon (`lanfp daemon start`, `lanfp serve`, or login autostart): discovery and the grant handshake talk to the other machine's daemon, and data commands auto-start the daemon only on the machine where you run them.
+The machine that exposes a service is the **host**; the machine that uses it is the **consumer**. Both machines must be running the daemon (`lanpf daemon start`, `lanpf serve`, or login autostart): discovery and the grant handshake talk to the other machine's daemon, and data commands auto-start the daemon only on the machine where you run them.
 
-1. On the host, `lanfp scan` lists devices running `lanfp serve`; authorize one with `lanfp peer grant` (pick from the scan) or pass selectors:
+1. On the host, `lanpf scan` lists devices running `lanpf serve`; authorize one with `lanpf peer grant` (pick from the scan) or pass selectors:
 
    ```sh
-   $ lanfp peer grant mac-mini@192.168.8.11
+   $ lanpf peer grant mac-mini@192.168.8.11
    granted mac-mini@192.168.8.11 [5e6f7a8b]
    key fingerprint: 1a2b...
    mac-mini@192.168.8.11 may now connect and forward exposed ports on this machine
    ```
 
-2. The consumer can now run `lanfp remote` to see every host that authorized it and that host's exposure view.
+2. The consumer can now run `lanpf remote` to see every host that authorized it and that host's exposure view.
 
 - The grant uses a one-way `FPG1` handshake on the agent port: the host stores `may_connect`, the consumer stores the host as a known server (`may_dial`) for pinning and dialing. The consumer is not authorized to be accessed by the host.
-- `lanfp peer list` shows only devices this machine authorized. On the consumer, the host appears in `remote` and in `scan` as `server`, not in `peer list`.
+- `lanpf peer list` shows only devices this machine authorized. On the consumer, the host appears in `remote` and in `scan` as `server`, not in `peer list`.
 - `--force` replaces a stored key after a device reinstall; without it a key change exits 9.
 - `peer revoke` clears `may_connect`, removes the key from the TLS allow-list, drops the session and deletes inbound references. The consumer's server record stays and reports offline until a later grant.
 - `peer set-address` works for any known device, including a server learned by `remote`; use it when mDNS is unavailable.
@@ -74,12 +74,12 @@ expose_ports = ["80", "443", "3000-4000", "8000-8100"]
 
 ## Forwarding
 
-`lanfp forward add <peer> <target_port>` listens on `127.0.0.1:<target_port>`; `--listen <port>` picks another local port and `--listen 0` lets the OS choose:
+`lanpf forward add <peer> <target_port>` listens on `127.0.0.1:<target_port>`; `--listen <port>` picks another local port and `--listen 0` lets the OS choose:
 
 ```sh
-$ lanfp forward add nix 3000
+$ lanpf forward add nix 3000
 created 3000 -> nix@192.168.8.10:3000 (active)
-$ lanfp forward add nix 5000 --listen 0
+$ lanpf forward add nix 5000 --listen 0
 created 52714 -> nix@192.168.8.10:5000 (active)
 ```
 
@@ -116,7 +116,7 @@ Every data command's `--json` prints one object with `schema: 2`; errors go to s
 
 ## Configuration
 
-Paths: Linux `~/.config/lanfp/config.toml`, macOS `~/Library/Application Support/lanfp/config.toml`, Windows `%APPDATA%\lanfp\config.toml`. The file is generated on first start:
+Paths: Linux `~/.config/lanpf/config.toml`, macOS `~/Library/Application Support/lanpf/config.toml`, Windows `%APPDATA%\lanpf\config.toml`. The file is generated on first start:
 
 ```toml
 [agent]
@@ -135,15 +135,15 @@ scan_timeout_secs = 3
 interval_ms = 2000
 ```
 
-Most settings hot-reload within about 5 seconds; `agent.listen` and `discovery.mdns` take effect after `lanfp daemon stop && lanfp daemon start`. Set `LANFP_HOME=/some/dir` to keep config, data, identity and logs in one tree.
+Most settings hot-reload within about 5 seconds; `agent.listen` and `discovery.mdns` take effect after `lanpf daemon stop && lanpf daemon start`. Set `LANPF_HOME=/some/dir` to keep config, data, identity and logs in one tree.
 
 ## Data and logs
 
 | Platform | Config | Database | Logs |
 |---|---|---|---|
-| Linux | `~/.config/lanfp/config.toml` | `~/.local/share/lanfp/lanfp.db` | `~/.local/state/lanfp/lanfp.log` |
-| macOS | `~/Library/Application Support/lanfp/config.toml` | `lanfp.db` in the same directory | `logs/lanfp.log` in the same directory |
-| Windows | `%APPDATA%\lanfp\config.toml` | `%LOCALAPPDATA%\lanfp\lanfp.db` | `logs\lanfp.log` in the same directory |
+| Linux | `~/.config/lanpf/config.toml` | `~/.local/share/lanpf/lanpf.db` | `~/.local/state/lanpf/lanpf.log` |
+| macOS | `~/Library/Application Support/lanpf/config.toml` | `lanpf.db` in the same directory | `logs/lanpf.log` in the same directory |
+| Windows | `%APPDATA%\lanpf\config.toml` | `%LOCALAPPDATA%\lanpf\lanpf.db` | `logs\lanpf.log` in the same directory |
 
-- Identity: `identity.key` (0600) and `identity.crt` in the data directory, which moves the identity; IPC is `$XDG_RUNTIME_DIR/lanfp/ctl.sock` on Linux (fallback `/tmp/lanfp-<uid>/ctl.sock`, mode 0600), `$TMPDIR/lanfp/ctl.sock` on macOS, and `\\.\pipe\lanfp-<username>-<hash>` on Windows.
-- Logs rotate once at 5 MiB (`lanfp.log.1`) when the CLI spawns the daemon.
+- Identity: `identity.key` (0600) and `identity.crt` in the data directory, which moves the identity; IPC is `$XDG_RUNTIME_DIR/lanpf/ctl.sock` on Linux (fallback `/tmp/lanpf-<uid>/ctl.sock`, mode 0600), `$TMPDIR/lanpf/ctl.sock` on macOS, and `\\.\pipe\lanpf-<username>-<hash>` on Windows.
+- Logs rotate once at 5 MiB (`lanpf.log.1`) when the CLI spawns the daemon.

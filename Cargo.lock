@@ -823,7 +823,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lanfp"
+name = "lanpf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -834,9 +834,9 @@ dependencies = [
  "hex",
  "hostname",
  "if-addrs",
- "lanfp-core",
- "lanfp-crypto",
- "lanfp-inventory",
+ "lanpf-core",
+ "lanpf-crypto",
+ "lanpf-inventory",
  "libc",
  "mdns-sd",
  "rand 0.8.8",
@@ -858,7 +858,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lanfp-core"
+name = "lanpf-core"
 version = "0.1.0"
 dependencies = [
  "proptest",
@@ -870,13 +870,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "lanfp-crypto"
+name = "lanpf-crypto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
  "hex",
- "lanfp-core",
+ "lanpf-core",
  "rand 0.8.8",
  "rcgen",
  "rustls",
@@ -888,11 +888,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "lanfp-inventory"
+name = "lanpf-inventory"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "lanfp-core",
+ "lanpf-core",
  "netstat2",
  "sysinfo",
 ]

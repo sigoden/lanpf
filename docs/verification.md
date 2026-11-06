@@ -2,14 +2,14 @@
 
 ## Automated tests
 
-`cargo test --workspace` runs each crate's unit tests plus the loopback suite in `crates/lanfp/tests/e2e.rs`.
+`cargo test --workspace` runs each crate's unit tests plus the loopback suite in `crates/lanpf/tests/e2e.rs`.
 
 | Suite | Coverage |
 |---|---|
-| `lanfp-core` | Frame and IPC codecs, protocol messages, grant/exposure round-trips, peer selectors and display names |
-| `lanfp-crypto` | Identity persistence, Ed25519 signatures, transcripts, fingerprints, certificate parsing and key pinning |
-| `lanfp-inventory` | Port classification, native filtering, self-listener exclusion, macOS `netstat` parsing |
-| `lanfp` | Configuration, database trust directions, exposure policy, discovery TXT parsing, output helpers and CLI utilities |
+| `lanpf-core` | Frame and IPC codecs, protocol messages, grant/exposure round-trips, peer selectors and display names |
+| `lanpf-crypto` | Identity persistence, Ed25519 signatures, transcripts, fingerprints, certificate parsing and key pinning |
+| `lanpf-inventory` | Port classification, native filtering, self-listener exclusion, macOS `netstat` parsing |
+| `lanpf` | Configuration, database trust directions, exposure policy, discovery TXT parsing, output helpers and CLI utilities |
 | Loopback E2E | Two daemons, one-way grant, session establishment, exposure and listening views, non-listening whitelist targets, revocation, forwarding (100 MiB transfer, half-close, 100 concurrent streams, `--listen 0`), IPC privacy, exit codes, JSON, rule recovery, selectors and address updates |
 
 ## Key commands
@@ -18,7 +18,7 @@
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets
 cargo test --workspace
-cargo build --release -p lanfp
+cargo build --release -p lanpf
 ```
 
 ## Current status
@@ -30,7 +30,7 @@ cargo build --release -p lanfp
 ## Two-host LAN run
 
 A macOS 15.5 (Apple silicon) machine and a Windows 11 VM were paired over a switched
-100BASE-TX LAN, both running the release binary with isolated `LANFP_HOME` trees.
+100BASE-TX LAN, both running the release binary with isolated `LANPF_HOME` trees.
 
 | Area | Result |
 |---|---|

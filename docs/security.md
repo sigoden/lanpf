@@ -15,7 +15,7 @@ Trust boundaries, threat model and accepted risks. Read [explicitly accepted ris
 
 ## Transport
 
-- TLS 1.3 (rustls) only, ALPN `lanfp/1`, 0-RTT disabled.
+- TLS 1.3 (rustls) only, ALPN `lanpf/1`, 0-RTT disabled.
 - Both sides use self-signed certificates; the certificate key must equal the Ed25519 public key of the trust record.
 - The agent port validates client certificates against `may_connect`; the client accepts only the exact public key of the target server.
 - No CA, hostname or system certificate store dependency; certificates only carry public keys.
@@ -23,13 +23,13 @@ Trust boundaries, threat model and accepted risks. Read [explicitly accepted ris
 
 ## One-way authorization
 
-`lanfp peer grant` on the exposing machine S authorizes consumer C. The directions are stored separately:
+`lanpf peer grant` on the exposing machine S authorizes consumer C. The directions are stored separately:
 
 - `may_connect`: S allows C to connect. Only a grant sets it.
 - `may_dial`: C may dial S. The grant responder on C stores S this way so it can pin S's key; this is not reciprocal access.
 
 ```
-S: lanfp peer grant C
+S: lanpf peer grant C
   S → C: FPG1 Hello(S identity, nonce, pubkey, cert)
   C → S: Challenge(C identity, nonce, pubkey, cert)
   S → C: Prove(signature over both identities, nonces and keys)
@@ -39,7 +39,7 @@ S: lanfp peer grant C
 ```
 
 - The transcript binds both UUIDs, both nonces and both public keys, signed by both Ed25519 keys. Nonces are 32 random bytes; the handshake times out after 10 seconds and requires protocol version 2.
-- With mDNS, the target's `pk` TXT value must match the handshake key. This blocks simple on-path key substitution but not a forged mDNS record. Manual addresses are trust-on-first-use; compare the printed fingerprint with `lanfp daemon status` on the other device if the LAN is not trusted.
+- With mDNS, the target's `pk` TXT value must match the handshake key. This blocks simple on-path key substitution but not a forged mDNS record. Manual addresses are trust-on-first-use; compare the printed fingerprint with `lanpf daemon status` on the other device if the LAN is not trusted.
 - A changed key (device reinstall) is rejected unless the grant uses `--force`; the old key is removed from the allow-list before the new one is added.
 - `peer revoke` clears `may_connect`, removes the key from the allow-list, cancels the session and deletes inbound references. The consumer's `may_dial` record stays and reports offline until a later grant.
 
@@ -55,11 +55,11 @@ S: lanfp peer grant C
 ## Target boundaries
 
 - Targets must be in the server's exposure view (all mode: currently listening; whitelist: may be non-listening).
-- Dial targets are chosen server-side: `127.0.0.1`, `::1`, then the address the port is bound to. Arbitrary `host:port` targets are rejected, so lanfp cannot be used as a jump host.
+- Dial targets are chosen server-side: `127.0.0.1`, `::1`, then the address the port is bound to. Arbitrary `host:port` targets are rejected, so lanpf cannot be used as a jump host.
 
 ## Local IPC
 
-- Unix socket, mode 0600, in a runtime directory with mode 0700; Windows named pipe `\\.\pipe\lanfp-<username>-<hash>` using the process default DACL.
+- Unix socket, mode 0600, in a runtime directory with mode 0700; Windows named pipe `\\.\pipe\lanpf-<username>-<hash>` using the process default DACL.
 - Frames are `u32 BE length + JSON`, maximum 16 MiB.
 
 ## Listener exposure

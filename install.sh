@@ -2,8 +2,8 @@
 
 set -eu
 
-repo=sigoden/lanfp
-crate=lanfp
+repo=sigoden/lanpf
+crate=lanpf
 url=https://github.com/$repo
 releases=$url/releases
 
