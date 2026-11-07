@@ -37,7 +37,7 @@
 - Selectors accept a full UUID, a unique short prefix, a unique name, the current `name@address`, and a bare address; an ambiguous match exits 2 with the candidates.
 - Rules exist only on the consumer side; the exposing side is read-only apart from `inbound` references.
 - A pure consumer always dials; the UUID dialer election applies only when both sides have authorized each other.
-- A session carries at most 256 streams, opens at most 100 per second, and closes a stream idle for 30 minutes.
+- A session carries at most `agent.max_streams` streams (default 256, maximum 511), opens at most `agent.max_new_streams_per_sec` per direction per second (default 100), and closes a stream idle for 30 minutes. When the stream limit is reached, the least recently active stream that has been idle for at least two minutes is closed to make room.
 - One rule per listening port by default; `--listen 0` lets the OS pick a free loopback port.
 - Both sides must allow inbound traffic on the agent port, or dialing fails in both directions.
 - Revoking does not notify the consumer; its known-server record stays and reports offline until a later grant.

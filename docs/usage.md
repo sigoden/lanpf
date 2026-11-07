@@ -122,6 +122,7 @@ Paths: Linux `~/.config/lanpf/config.toml`, macOS `~/Library/Application Support
 [agent]
 listen = "0.0.0.0:47811"
 max_streams = 256
+max_new_streams_per_sec = 100
 idle_timeout_secs = 1800
 # Exposure whitelist: single ports and inclusive ranges ("3000-4000").
 # An empty list exposes every Native listening port.
@@ -134,6 +135,8 @@ scan_timeout_secs = 3
 [inventory]
 interval_ms = 2000
 ```
+
+`agent.max_streams` accepts 1-511: one yamux stream slot is reserved for the control stream. `agent.max_new_streams_per_sec` limits how many new streams a session opens per direction and defaults to 100. Both are read when a session is established.
 
 Most settings hot-reload within about 5 seconds; `agent.listen` and `discovery.mdns` take effect after `lanpf daemon stop && lanpf daemon start`. Set `LANPF_HOME=/some/dir` to keep config, data, identity and logs in one tree.
 
