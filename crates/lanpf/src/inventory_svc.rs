@@ -18,6 +18,12 @@ pub struct InventoryService {
     self_pid: u32,
     agent_port: u16,
     forward_ports: Arc<RwLock<HashSet<u16>>>,
+    /// Serializes snapshots so a burst of callers cannot queue one expensive
+    /// enumeration per connection.
+    refresh_gate: tokio::sync::Mutex<()>,
+    /// Advanced after every completed snapshot; a caller that waited on the
+    /// gate can reuse the result instead of scanning again.
+    refresh_seq: AtomicU64,
 }
 
 impl InventoryService {
@@ -32,6 +38,8 @@ impl InventoryService {
             self_pid: std::process::id(),
             agent_port,
             forward_ports,
+            refresh_gate: tokio::sync::Mutex::new(()),
+            refresh_seq: AtomicU64::new(0),
         }))
     }
 
@@ -52,7 +60,17 @@ impl InventoryService {
     }
 
     /// Refresh the snapshot, update caches and notify subscribers on change.
+    ///
+    /// Concurrent callers share one snapshot: whoever arrives while a scan is
+    /// in flight waits for it and reuses the result. This matters on the data
+    /// path, where every new forwarded connection may notice a stale cache and
+    /// ask for a refresh at the same time.
     pub async fn refresh(self: &Arc<Self>) -> Result<Vec<ListenerEntry>> {
+        let arrival = self.refresh_seq.load(Ordering::SeqCst);
+        let _gate = self.refresh_gate.lock().await;
+        if self.refresh_seq.load(Ordering::SeqCst) != arrival {
+            return Ok(self.all());
+        }
         let this = self.clone();
         let entries = tokio::task::spawn_blocking(move || {
             let mut en = this.enumerator.lock().unwrap_or_else(|e| e.into_inner());
@@ -61,6 +79,7 @@ impl InventoryService {
         .await
         .map_err(|e| anyhow::anyhow!("inventory task failed: {e}"))??;
         self.apply(entries);
+        self.refresh_seq.fetch_add(1, Ordering::SeqCst);
         Ok(self.all())
     }
 

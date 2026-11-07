@@ -364,7 +364,7 @@ impl Daemon {
             tracing::debug!("rejecting connection on {listen_port}: peer offline");
             return;
         };
-        let (yamux_stream, permit) = match handle.open_stream().await {
+        let (yamux_stream, permit) = match handle.open_stream(&cancel).await {
             Ok(value) => value,
             Err(err) => {
                 tracing::warn!("cannot open data stream for rule {listen_port}: {err:#}");
@@ -377,8 +377,14 @@ impl Daemon {
             tracing::warn!("cannot write data stream header: {err}");
             return;
         }
-        let (up, down) =
-            proxy_streams(stream, yamux_stream, self.config().idle_timeout(), cancel).await;
+        let (up, down) = proxy_streams(
+            stream,
+            yamux_stream,
+            self.config().idle_timeout(),
+            permit.cancel_token(),
+            Some(permit.last_activity()),
+        )
+        .await;
         tracing::debug!(
             "forwarded connection on {listen_port} finished ({} sent, {} received)",
             human_bytes(up),

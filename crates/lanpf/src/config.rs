@@ -9,6 +9,11 @@ use std::time::Duration;
 
 pub const DEFAULT_AGENT_LISTEN: &str = "0.0.0.0:47811";
 
+/// A yamux connection carries the control stream plus the data streams. yamux
+/// rejects the 513th stream with `TooManyStreams`, which lanpf treats as a
+/// connection error, so keep one slot for the control stream.
+pub const MAX_STREAMS_PER_SESSION: usize = 511;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
@@ -23,6 +28,7 @@ pub struct Config {
 pub struct AgentConfig {
     pub listen: String,
     pub max_streams: usize,
+    pub max_new_streams_per_sec: u32,
     pub idle_timeout_secs: u64,
     /// Whitelist of ports forwarded peers may reach on this machine: single
     /// ports (`"80"`) and inclusive ranges (`"3000-4000"`). Empty or missing
@@ -48,6 +54,7 @@ impl Default for AgentConfig {
         Self {
             listen: DEFAULT_AGENT_LISTEN.to_string(),
             max_streams: 256,
+            max_new_streams_per_sec: 100,
             idle_timeout_secs: 1800,
             expose_ports: Vec::new(),
         }
@@ -108,6 +115,14 @@ impl Config {
         self.agent.expose_ranges()?;
         if self.agent.max_streams == 0 {
             bail!("agent.max_streams must be greater than zero");
+        }
+        if self.agent.max_streams > MAX_STREAMS_PER_SESSION {
+            bail!(
+                "agent.max_streams must be at most {MAX_STREAMS_PER_SESSION} (one yamux stream slot is reserved for the control stream)"
+            );
+        }
+        if self.agent.max_new_streams_per_sec == 0 {
+            bail!("agent.max_new_streams_per_sec must be greater than zero");
         }
         if self.inventory.interval_ms < 100 {
             bail!("inventory.interval_ms must be at least 100");
@@ -223,6 +238,8 @@ mod tests {
         let c = Config::default();
         c.validate().unwrap();
         assert_eq!(c.agent.listen, "0.0.0.0:47811");
+        assert_eq!(c.agent.max_streams, 256);
+        assert_eq!(c.agent.max_new_streams_per_sec, 100);
         assert_eq!(c.scan_timeout(), Duration::from_secs(3));
         assert_eq!(c.inventory_interval(), Duration::from_millis(2000));
     }
@@ -251,6 +268,23 @@ mod tests {
         let mut c = Config::default();
         c.agent.listen = "not-an-address".into();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_stream_limits() {
+        let mut c = Config::default();
+        c.agent.max_streams = 0;
+        assert!(c.validate().is_err());
+
+        c.agent.max_streams = MAX_STREAMS_PER_SESSION + 1;
+        assert!(c.validate().is_err());
+
+        c.agent.max_streams = MAX_STREAMS_PER_SESSION;
+        c.agent.max_new_streams_per_sec = 0;
+        assert!(c.validate().is_err());
+
+        c.agent.max_new_streams_per_sec = 100;
+        assert!(c.validate().is_ok());
     }
 
     #[test]

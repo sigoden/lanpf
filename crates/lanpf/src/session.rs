@@ -52,54 +52,224 @@ struct RateState {
     count: u32,
 }
 
+/// Stream creation direction. The concurrency budget is session-wide because
+/// yamux has one stream budget per connection, but the per-second open budget
+/// is tracked per direction so a burst of inbound streams cannot starve the
+/// outbound opens (or vice versa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamDirection {
+    Inbound,
+    Outbound,
+}
+
+struct StreamState {
+    last_activity: Arc<AtomicU64>,
+    cancel: CancellationToken,
+    evicted: bool,
+}
+
 pub struct StreamLimiter {
     max: usize,
+    max_opens_per_sec: u32,
     current: AtomicUsize,
-    rate: Mutex<RateState>,
+    inbound_rate: Mutex<RateState>,
+    outbound_rate: Mutex<RateState>,
+    streams: Mutex<HashMap<u64, StreamState>>,
+    next_id: AtomicU64,
 }
 
 pub struct StreamPermit {
     limiter: Arc<StreamLimiter>,
+    id: u64,
+    last_activity: Arc<AtomicU64>,
+    cancel: CancellationToken,
 }
+
+/// Why a stream could not be admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamLimitError {
+    Busy { limit: usize },
+    RateLimited { per_sec: u32 },
+}
+
+impl std::fmt::Display for StreamLimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy { limit } => write!(
+                f,
+                "session stream limit reached ({limit} concurrent streams)"
+            ),
+            Self::RateLimited { per_sec } => write!(
+                f,
+                "too many new streams ({per_sec} per second); retry shortly"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StreamLimitError {}
+
+/// A stream that has been idle for this long may be closed to make room for a
+/// new connection once the session is full. This is deliberately shorter than
+/// the normal idle timeout: at capacity, rejecting new connections is worse
+/// than dropping a stream that has carried no bytes for two minutes.
+const STREAM_RECLAIM_IDLE: Duration = Duration::from_secs(120);
+/// How long to wait for an evicted stream to release its permit.
+const STREAM_RECLAIM_WAIT: Duration = Duration::from_millis(250);
 
 impl Drop for StreamPermit {
     fn drop(&mut self) {
         self.limiter.current.fetch_sub(1, Ordering::Relaxed);
+        self.limiter.streams.lock().unwrap().remove(&self.id);
+    }
+}
+
+impl StreamPermit {
+    pub fn last_activity(&self) -> Arc<AtomicU64> {
+        self.last_activity.clone()
+    }
+
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 }
 
 impl StreamLimiter {
-    pub fn new(max: usize) -> Arc<Self> {
+    pub fn new(max: usize, max_opens_per_sec: u32) -> Arc<Self> {
         Arc::new(Self {
             max,
+            max_opens_per_sec,
             current: AtomicUsize::new(0),
-            rate: Mutex::new(RateState {
+            inbound_rate: Mutex::new(RateState {
                 window_start: Instant::now(),
                 count: 0,
             }),
+            outbound_rate: Mutex::new(RateState {
+                window_start: Instant::now(),
+                count: 0,
+            }),
+            streams: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
         })
     }
 
-    pub fn try_acquire(self: &Arc<Self>) -> Option<StreamPermit> {
-        let now = Instant::now();
-        {
-            let mut rate = self.rate.lock().unwrap();
-            if now.duration_since(rate.window_start) >= Duration::from_secs(1) {
-                rate.window_start = now;
-                rate.count = 0;
-            }
-            if rate.count >= 100 {
-                return None;
-            }
-            rate.count += 1;
+    fn rate_state(&self, direction: StreamDirection) -> &Mutex<RateState> {
+        match direction {
+            StreamDirection::Inbound => &self.inbound_rate,
+            StreamDirection::Outbound => &self.outbound_rate,
         }
+    }
+
+    fn admit_rate(&self, direction: StreamDirection, now: Instant) -> bool {
+        let mut rate = self.rate_state(direction).lock().unwrap();
+        if now.duration_since(rate.window_start) >= Duration::from_secs(1) {
+            rate.window_start = now;
+            rate.count = 0;
+        }
+        if rate.count >= self.max_opens_per_sec {
+            return false;
+        }
+        rate.count += 1;
+        true
+    }
+
+    fn rate_available(&self, direction: StreamDirection, now: Instant) -> bool {
+        let rate = self.rate_state(direction).lock().unwrap();
+        now.duration_since(rate.window_start) >= Duration::from_secs(1)
+            || rate.count < self.max_opens_per_sec
+    }
+
+    fn try_acquire(
+        self: &Arc<Self>,
+        direction: StreamDirection,
+        parent: &CancellationToken,
+        now: Instant,
+    ) -> Result<StreamPermit, StreamLimitError> {
         if self.current.fetch_add(1, Ordering::SeqCst) >= self.max {
             self.current.fetch_sub(1, Ordering::SeqCst);
-            return None;
+            return Err(StreamLimitError::Busy { limit: self.max });
         }
-        Some(StreamPermit {
+        // Only admitted streams consume the per-second budget: a burst that is
+        // rejected by the concurrency cap must not also exhaust the rate.
+        if !self.admit_rate(direction, now) {
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            return Err(StreamLimitError::RateLimited {
+                per_sec: self.max_opens_per_sec,
+            });
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let last_activity = Arc::new(AtomicU64::new(now_ts() as u64));
+        let cancel = parent.child_token();
+        self.streams.lock().unwrap().insert(
+            id,
+            StreamState {
+                last_activity: last_activity.clone(),
+                cancel: cancel.clone(),
+                evicted: false,
+            },
+        );
+        Ok(StreamPermit {
             limiter: self.clone(),
+            id,
+            last_activity,
+            cancel,
         })
+    }
+
+    /// Close the least recently active stream if it has been idle long enough.
+    /// The entry stays in the map until the stream task drops its permit, so a
+    /// retry does not evict a second stream for the same slot.
+    fn evict_idle(&self) -> bool {
+        let cutoff = (now_ts() as u64).saturating_sub(STREAM_RECLAIM_IDLE.as_secs());
+        let mut streams = self.streams.lock().unwrap();
+        let victim = streams
+            .iter()
+            .filter(|(_, state)| {
+                !state.evicted && state.last_activity.load(Ordering::Relaxed) <= cutoff
+            })
+            .min_by_key(|(_, state)| state.last_activity.load(Ordering::Relaxed))
+            .map(|(id, _)| *id);
+        let Some(id) = victim else {
+            return false;
+        };
+        let Some(state) = streams.get_mut(&id) else {
+            return false;
+        };
+        state.evicted = true;
+        tracing::warn!("closing an idle data stream to make room for a new connection");
+        state.cancel.cancel();
+        true
+    }
+
+    /// Acquire a permit, evicting a long-idle stream when the session is full.
+    pub async fn acquire(
+        self: &Arc<Self>,
+        direction: StreamDirection,
+        parent: &CancellationToken,
+    ) -> Result<StreamPermit, StreamLimitError> {
+        match self.try_acquire(direction, parent, Instant::now()) {
+            Ok(permit) => return Ok(permit),
+            Err(StreamLimitError::Busy { .. }) => {}
+            Err(err) => return Err(err),
+        }
+        // Do not evict a stream only to reject the new one on the open rate.
+        if !self.rate_available(direction, Instant::now()) {
+            return Err(StreamLimitError::RateLimited {
+                per_sec: self.max_opens_per_sec,
+            });
+        }
+        if !self.evict_idle() {
+            return Err(StreamLimitError::Busy { limit: self.max });
+        }
+        let deadline = Instant::now() + STREAM_RECLAIM_WAIT;
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            match self.try_acquire(direction, parent, Instant::now()) {
+                Ok(permit) => return Ok(permit),
+                Err(StreamLimitError::Busy { .. }) if Instant::now() < deadline => {}
+                Err(err) => return Err(err),
+            }
+        }
     }
 }
 
@@ -150,11 +320,12 @@ impl SessionHandle {
         let _ = self.control_tx.send(message).await;
     }
 
-    pub async fn open_stream(&self) -> Result<(Stream, StreamPermit)> {
+    pub async fn open_stream(&self, parent: &CancellationToken) -> Result<(Stream, StreamPermit)> {
         let permit = self
             .limiter
-            .try_acquire()
-            .context("session stream limit reached")?;
+            .acquire(StreamDirection::Outbound, parent)
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
         let (tx, rx) = oneshot::channel();
         self.open_tx
             .send(OpenRequest { tx })
@@ -290,7 +461,13 @@ impl Daemon {
         } else {
             Mode::Server
         };
-        let conn = Connection::new(stream.compat(), yamux::Config::default(), mode);
+        // Keep one yamux slot for the control stream: the limiter admits at
+        // most `max_streams` data streams and yamux closes the whole connection
+        // when its own limit is hit.
+        let cfg = self.config();
+        let mut yamux_config = yamux::Config::default();
+        yamux_config.set_max_num_streams(cfg.agent.max_streams.saturating_add(1));
+        let conn = Connection::new(stream.compat(), yamux_config, mode);
         let (open_tx, open_rx) = mpsc::channel::<OpenRequest>(64);
         let (inbound_tx, mut inbound_rx) = mpsc::channel::<Stream>(64);
         let session_cancel = self.shutdown.child_token();
@@ -384,7 +561,7 @@ impl Daemon {
             exposure_received: AtomicBool::new(false),
             control_tx,
             open_tx,
-            limiter: StreamLimiter::new(self.config().agent.max_streams),
+            limiter: StreamLimiter::new(cfg.agent.max_streams, cfg.agent.max_new_streams_per_sec),
             cancel: session_cancel,
             last_rx: Mutex::new(Instant::now()),
         });
@@ -645,9 +822,16 @@ impl Daemon {
     }
 
     async fn handle_inbound_data(self: &Arc<Self>, handle: Arc<SessionHandle>, stream: Stream) {
-        let Some(permit) = handle.limiter.try_acquire() else {
-            tracing::warn!("dropping data stream: session limit reached");
-            return;
+        let permit = match handle
+            .limiter
+            .acquire(StreamDirection::Inbound, &handle.cancel)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(err) => {
+                tracing::warn!("dropping data stream: {err}");
+                return;
+            }
         };
         let mut stream = stream.compat();
         let mut header = [0u8; DATA_HEADER_LEN];
@@ -701,8 +885,14 @@ impl Daemon {
             );
             return;
         };
-        let cancel = handle.cancel.child_token();
-        let (up, down) = proxy_streams(stream, target, self.config().idle_timeout(), cancel).await;
+        let (up, down) = proxy_streams(
+            stream,
+            target,
+            self.config().idle_timeout(),
+            permit.cancel_token(),
+            Some(permit.last_activity()),
+        )
+        .await;
         tracing::debug!(
             "data stream to port {} finished ({} -> peer, {} <- peer)",
             header.target_port,
@@ -817,12 +1007,31 @@ fn poll_driver<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    loop {
-        if let Some(request) = pending.take() {
-            match conn.poll_new_outbound(cx) {
+    // Try the parked request first. If yamux has no stream credit yet, keep it
+    // parked and still poll inbound below: ACKs and stream drops carried by
+    // inbound frames are what make `poll_new_outbound` ready again.
+    if let Some(request) = pending.take() {
+        match conn.poll_new_outbound(cx) {
+            Poll::Ready(Ok(stream)) => {
+                let _ = request.tx.send(Ok(stream));
+            }
+            Poll::Ready(Err(err)) => {
+                let _ = request.tx.send(Err(err.to_string()));
+                return Poll::Ready(DriverEvent::Closed(Some(err.to_string())));
+            }
+            Poll::Pending => {
+                *pending = Some(request);
+            }
+        }
+    }
+
+    // While no request is parked, satisfy queued opens. Once one blocks, leave
+    // the rest in the channel and fall through to the inbound poll.
+    while pending.is_none() {
+        match open_rx.poll_recv(cx) {
+            Poll::Ready(Some(request)) => match conn.poll_new_outbound(cx) {
                 Poll::Ready(Ok(stream)) => {
                     let _ = request.tx.send(Ok(stream));
-                    continue;
                 }
                 Poll::Ready(Err(err)) => {
                     let _ = request.tx.send(Err(err.to_string()));
@@ -830,33 +1039,18 @@ where
                 }
                 Poll::Pending => {
                     *pending = Some(request);
-                    return Poll::Pending;
                 }
-            }
-        }
-        while let Poll::Ready(Some(request)) = open_rx.poll_recv(cx) {
-            match conn.poll_new_outbound(cx) {
-                Poll::Ready(Ok(stream)) => {
-                    let _ = request.tx.send(Ok(stream));
-                }
-                Poll::Ready(Err(err)) => {
-                    let _ = request.tx.send(Err(err.to_string()));
-                    return Poll::Ready(DriverEvent::Closed(Some(err.to_string())));
-                }
-                Poll::Pending => {
-                    *pending = Some(request);
-                    return Poll::Pending;
-                }
-            }
-        }
-        match conn.poll_next_inbound(cx) {
-            Poll::Ready(Some(Ok(stream))) => return Poll::Ready(DriverEvent::Inbound(stream)),
-            Poll::Ready(Some(Err(err))) => {
-                return Poll::Ready(DriverEvent::Closed(Some(err.to_string())))
-            }
+            },
             Poll::Ready(None) => return Poll::Ready(DriverEvent::Closed(None)),
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => break,
         }
+    }
+
+    match conn.poll_next_inbound(cx) {
+        Poll::Ready(Some(Ok(stream))) => Poll::Ready(DriverEvent::Inbound(stream)),
+        Poll::Ready(Some(Err(err))) => Poll::Ready(DriverEvent::Closed(Some(err.to_string()))),
+        Poll::Ready(None) => Poll::Ready(DriverEvent::Closed(None)),
+        Poll::Pending => Poll::Pending,
     }
 }
 
@@ -1059,6 +1253,7 @@ async fn copy_half<R, W>(
     mut reader: R,
     mut writer: W,
     counter: Arc<AtomicU64>,
+    last_activity: Option<Arc<AtomicU64>>,
 ) -> std::io::Result<u64>
 where
     R: TokioAsyncRead + Unpin,
@@ -1074,6 +1269,9 @@ where
         }
         writer.write_all(&buf[..n]).await?;
         counter.fetch_add(n as u64, Ordering::Relaxed);
+        if let Some(activity) = &last_activity {
+            activity.store(now_ts() as u64, Ordering::Relaxed);
+        }
         total += n as u64;
     }
 }
@@ -1085,6 +1283,7 @@ pub async fn proxy_streams<A, B>(
     b: B,
     idle: Duration,
     cancel: CancellationToken,
+    last_activity: Option<Arc<AtomicU64>>,
 ) -> (u64, u64)
 where
     A: TokioAsyncRead + TokioAsyncWrite + Unpin,
@@ -1095,9 +1294,11 @@ where
     let counter = Arc::new(AtomicU64::new(0));
     let counter_a = counter.clone();
     let counter_b = counter.clone();
+    let activity_a = last_activity.clone();
+    let activity_b = last_activity;
     let copy = async move {
-        let a_to_b = copy_half(a_read, b_write, counter_a);
-        let b_to_a = copy_half(b_read, a_write, counter_b);
+        let a_to_b = copy_half(a_read, b_write, counter_a, activity_a);
+        let b_to_a = copy_half(b_read, a_write, counter_b, activity_b);
         tokio::try_join!(a_to_b, b_to_a)
     };
     tokio::pin!(copy);
@@ -1148,4 +1349,86 @@ pub fn peer_exposes_port(handle: &SessionHandle, port: u16) -> bool {
                 }
             })
             .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stream_limiter_caps_concurrency() {
+        let limiter = StreamLimiter::new(2, 100);
+        let parent = CancellationToken::new();
+        let _a = limiter
+            .acquire(StreamDirection::Outbound, &parent)
+            .await
+            .unwrap();
+        let _b = limiter
+            .acquire(StreamDirection::Inbound, &parent)
+            .await
+            .unwrap();
+        assert!(matches!(
+            limiter.acquire(StreamDirection::Outbound, &parent).await,
+            Err(StreamLimitError::Busy { limit: 2 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_limiter_rates_directions_separately() {
+        let limiter = StreamLimiter::new(8, 1);
+        let parent = CancellationToken::new();
+        let _out = limiter
+            .acquire(StreamDirection::Outbound, &parent)
+            .await
+            .unwrap();
+        // Keep the fixed one-second window from rolling during the test.
+        limiter.outbound_rate.lock().unwrap().window_start = Instant::now();
+        assert!(matches!(
+            limiter.acquire(StreamDirection::Outbound, &parent).await,
+            Err(StreamLimitError::RateLimited { per_sec: 1 })
+        ));
+        let _in = limiter
+            .acquire(StreamDirection::Inbound, &parent)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_limiter_evicts_a_long_idle_stream() {
+        let limiter = StreamLimiter::new(1, 100);
+        let parent = CancellationToken::new();
+        let first = limiter
+            .acquire(StreamDirection::Outbound, &parent)
+            .await
+            .unwrap();
+        first
+            .last_activity()
+            .store((now_ts() as u64).saturating_sub(3600), Ordering::Relaxed);
+        let token = first.cancel_token();
+        let observed = token.clone();
+        // The real proxy task drops its permit once cancellation is observed.
+        tokio::spawn(async move {
+            token.cancelled().await;
+            drop(first);
+        });
+        let _second = limiter
+            .acquire(StreamDirection::Inbound, &parent)
+            .await
+            .unwrap();
+        assert!(observed.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stream_limiter_does_not_evict_active_streams() {
+        let limiter = StreamLimiter::new(1, 100);
+        let parent = CancellationToken::new();
+        let _first = limiter
+            .acquire(StreamDirection::Outbound, &parent)
+            .await
+            .unwrap();
+        assert!(matches!(
+            limiter.acquire(StreamDirection::Outbound, &parent).await,
+            Err(StreamLimitError::Busy { limit: 1 })
+        ));
+    }
 }
